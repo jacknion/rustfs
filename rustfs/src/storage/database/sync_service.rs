@@ -16,7 +16,7 @@
 //!
 //! This service provides non-blocking metadata sync from S3 operations to the database.
 
-use crate::storage::database::{get_database_pool, repositories::S3ObjectRepository, CreateS3Object};
+use crate::storage::database::{CreateS3Object, get_database_pool, repositories::S3ObjectRepository};
 use once_cell::sync::OnceCell;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -28,7 +28,7 @@ static SYNC_SERVICE_TX: OnceCell<mpsc::UnboundedSender<MetadataSyncEvent>> = Onc
 #[derive(Debug, Clone)]
 pub enum MetadataSyncEvent {
     /// Object was created or updated
-    Upsert(CreateS3Object),
+    Upsert(Box<CreateS3Object>),
 
     /// Object was deleted
     Delete { bucket: String, object_key: String },
@@ -76,17 +76,17 @@ pub fn init_metadata_sync_service(config: MetadataSyncConfig) -> Result<(), Stri
         .set(tx)
         .map_err(|_| "Metadata sync service already initialized".to_string())?;
 
-    // Spawn background worker
-    tokio::spawn(async move {
-        metadata_sync_worker(rx, config).await;
-    });
-
     info!(
         target: "rustfs::storage::database::sync_service",
         batch_size = config.batch_size,
         flush_interval_secs = config.flush_interval_secs,
         "Metadata sync service initialized"
     );
+
+    // Spawn background worker
+    tokio::spawn(async move {
+        metadata_sync_worker(rx, config).await;
+    });
 
     Ok(())
 }
@@ -104,8 +104,7 @@ pub fn init_metadata_sync_service(config: MetadataSyncConfig) -> Result<(), Stri
 /// Returns `Ok(())` if the event was queued successfully
 pub fn send_sync_event(event: MetadataSyncEvent) -> Result<(), String> {
     if let Some(tx) = SYNC_SERVICE_TX.get() {
-        tx.send(event)
-            .map_err(|e| format!("Failed to send sync event: {}", e))?;
+        tx.send(event).map_err(|e| format!("Failed to send sync event: {}", e))?;
         Ok(())
     } else {
         Err("Metadata sync service not initialized".to_string())
@@ -146,7 +145,7 @@ async fn metadata_sync_worker(mut rx: mpsc::UnboundedReceiver<MetadataSyncEvent>
             Some(event) = rx.recv() => {
                 match event {
                     MetadataSyncEvent::Upsert(obj) => {
-                        batch_upserts.push(obj);
+                        batch_upserts.push(*obj);
                     }
                     MetadataSyncEvent::Delete { bucket, object_key } => {
                         batch_deletes.push((bucket, object_key));
@@ -266,7 +265,7 @@ mod tests {
     fn test_metadata_sync_event_construction() {
         use chrono::Utc;
 
-        let upsert_event = MetadataSyncEvent::Upsert(CreateS3Object {
+        let upsert_event = MetadataSyncEvent::Upsert(Box::new(CreateS3Object {
             bucket: "test".to_string(),
             object_key: "key".to_string(),
             version_id: None,
@@ -279,7 +278,7 @@ mod tests {
             user_metadata: None,
             owner_id: None,
             last_modified: Utc::now(),
-        });
+        }));
 
         assert!(matches!(upsert_event, MetadataSyncEvent::Upsert(_)));
 

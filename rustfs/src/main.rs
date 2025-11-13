@@ -30,7 +30,10 @@ use crate::server::{
     SHUTDOWN_TIMEOUT, ServiceState, ServiceStateManager, ShutdownSignal, init_event_notifier, shutdown_event_notifier,
     start_audit_system, start_http_server, stop_audit_system, wait_for_shutdown,
 };
-use crate::storage::database::{DatabaseConfig, init_database_pool, shutdown_database_pool};
+use crate::storage::database::{
+    DatabaseConfig, MetadataSyncConfig, init_database_pool, init_metadata_sync_service, shutdown_database_pool,
+    shutdown_metadata_sync_service,
+};
 use crate::storage::ecfs::{process_lambda_configurations, process_queue_configurations, process_topic_configurations};
 use chrono::Datelike;
 use clap::Parser;
@@ -281,6 +284,21 @@ async fn run(opt: config::Opt) -> Result<()> {
             target: "rustfs::main::run",
             "Database connection pool initialized successfully"
         );
+
+        // Initialize metadata sync service
+        let sync_config = MetadataSyncConfig::default();
+        init_metadata_sync_service(sync_config).map_err(|e| {
+            error!(
+                target: "rustfs::main::run",
+                error = %e,
+                "Failed to initialize metadata sync service"
+            );
+            Error::other(format!("Failed to initialize metadata sync service: {e}"))
+        })?;
+        info!(
+            target: "rustfs::main::run",
+            "Metadata sync service initialized successfully"
+        );
     } else {
         info!(
             target: "rustfs::main::run",
@@ -440,6 +458,13 @@ async fn handle_shutdown(
         "Shutting down event notifier system..."
     );
     shutdown_event_notifier().await;
+
+    // Shutdown metadata sync service if it was initialized
+    info!(
+        target: "rustfs::main::handle_shutdown",
+        "Shutting down metadata sync service..."
+    );
+    shutdown_metadata_sync_service().await;
 
     // Shutdown database connection pool if it was initialized
     info!(

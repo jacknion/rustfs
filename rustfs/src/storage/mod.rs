@@ -17,5 +17,6 @@ pub mod database;
 pub mod ecfs;
 pub(crate) mod entity;
 pub(crate) mod helper;
+pub mod metadata_extractor;
 pub mod options;
 pub mod tonic_service;

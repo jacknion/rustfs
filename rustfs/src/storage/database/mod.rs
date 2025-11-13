@@ -16,6 +16,10 @@
 //!
 //! This module provides connection pool management and data access for S3 object metadata.
 
+// Allow unused code during development - will be used in later integration steps
+#![allow(dead_code)]
+#![allow(unused_imports)]
+
 mod models;
 pub mod repositories;
 mod sync_service;
@@ -33,7 +37,9 @@ pub use models::{CreateS3Object, S3Object, S3ObjectMetadata, S3ObjectQuery};
 pub use repositories::S3ObjectRepository;
 
 // Re-export sync service
-pub use sync_service::{init_metadata_sync_service, shutdown_metadata_sync_service, MetadataSyncEvent};
+pub use sync_service::{
+    MetadataSyncConfig, MetadataSyncEvent, init_metadata_sync_service, send_sync_event, shutdown_metadata_sync_service,
+};
 
 /// Global database connection pool
 static DB_POOL: OnceCell<Arc<PgPool>> = OnceCell::new();

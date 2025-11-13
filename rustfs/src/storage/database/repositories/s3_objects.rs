@@ -14,7 +14,7 @@
 
 //! Repository for S3 object metadata operations
 
-use crate::storage::database::models::{CreateS3Object, S3Object, S3ObjectQuery, S3ObjectQueryResponse, S3ObjectMetadata};
+use crate::storage::database::models::{CreateS3Object, S3Object, S3ObjectMetadata, S3ObjectQuery, S3ObjectQueryResponse};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use std::collections::HashMap;
 use std::time::Instant;
@@ -37,8 +37,8 @@ impl S3ObjectRepository {
     ///
     /// Returns the ID of the inserted/updated record
     pub async fn upsert(pool: &PgPool, obj: &CreateS3Object) -> Result<i64, sqlx::Error> {
-        let tags_json = obj.tags.as_ref().map(|t| serde_json::to_value(t).ok()).flatten();
-        let user_metadata_json = obj.user_metadata.as_ref().map(|m| serde_json::to_value(m).ok()).flatten();
+        let tags_json = obj.tags.as_ref().and_then(|t| serde_json::to_value(t).ok());
+        let user_metadata_json = obj.user_metadata.as_ref().and_then(|m| serde_json::to_value(m).ok());
 
         let result = sqlx::query_scalar::<_, i64>(
             r#"
