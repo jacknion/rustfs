@@ -31,7 +31,7 @@ use std::time::Duration;
 use tracing::{error, info, warn};
 
 // Re-export models
-pub use models::{CreateS3Object, S3Object, S3ObjectMetadata, S3ObjectQuery};
+pub use models::{CreateS3Object, S3Object, S3ObjectMetadata, S3ObjectQuery, UpdateS3Object};
 
 // Re-export repositories
 pub use repositories::S3ObjectRepository;

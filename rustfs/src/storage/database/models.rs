@@ -111,6 +111,30 @@ pub struct CreateS3Object {
     pub last_modified: DateTime<Utc>,
 }
 
+/// DTO for updating S3 object metadata
+///
+/// All fields are optional - only provided fields will be updated
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateS3Object {
+    /// Update storage class
+    pub storage_class: Option<String>,
+
+    /// Update encryption algorithm
+    pub encryption: Option<String>,
+
+    /// Update or replace object tags
+    pub tags: Option<HashMap<String, String>>,
+
+    /// Update or replace user-defined metadata
+    pub user_metadata: Option<HashMap<String, String>>,
+
+    /// Update owner ID
+    pub owner_id: Option<String>,
+
+    /// Update content type
+    pub content_type: Option<String>,
+}
+
 /// Query parameters for searching S3 objects
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct S3ObjectQuery {

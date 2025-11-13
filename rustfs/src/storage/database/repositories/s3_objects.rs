@@ -14,7 +14,9 @@
 
 //! Repository for S3 object metadata operations
 
-use crate::storage::database::models::{CreateS3Object, S3Object, S3ObjectMetadata, S3ObjectQuery, S3ObjectQueryResponse};
+use crate::storage::database::models::{
+    CreateS3Object, S3Object, S3ObjectMetadata, S3ObjectQuery, S3ObjectQueryResponse, UpdateS3Object,
+};
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use std::collections::HashMap;
@@ -146,6 +148,142 @@ impl S3ObjectRepository {
         );
 
         Ok(result)
+    }
+
+    /// Update S3 object metadata
+    ///
+    /// Only updates the provided fields (partial update).
+    /// Does not update immutable fields like bucket, object_key, size_bytes, etag.
+    ///
+    /// # Arguments
+    ///
+    /// * `pool` - Database connection pool
+    /// * `bucket` - Bucket name
+    /// * `object_key` - Object key
+    /// * `update` - Fields to update
+    ///
+    /// # Returns
+    ///
+    /// Returns the number of updated rows (0 if object not found, 1 if updated)
+    pub async fn update(pool: &PgPool, bucket: &str, object_key: &str, update: &UpdateS3Object) -> Result<u64, sqlx::Error> {
+        // Build dynamic UPDATE query with only provided fields
+        let mut qb: QueryBuilder<Postgres> = QueryBuilder::new("UPDATE s3_objects SET ");
+
+        let mut has_fields = false;
+
+        // Add storage_class if provided
+        if let Some(ref storage_class) = update.storage_class {
+            if has_fields {
+                qb.push(", ");
+            }
+            qb.push("storage_class = ");
+            qb.push_bind(storage_class);
+            has_fields = true;
+        }
+
+        // Add encryption if provided
+        if let Some(ref encryption) = update.encryption {
+            if has_fields {
+                qb.push(", ");
+            }
+            qb.push("encryption = ");
+            qb.push_bind(encryption);
+            has_fields = true;
+        }
+
+        // Add content_type if provided
+        if let Some(ref content_type) = update.content_type {
+            if has_fields {
+                qb.push(", ");
+            }
+            qb.push("content_type = ");
+            qb.push_bind(content_type);
+            has_fields = true;
+        }
+
+        // Add tags if provided
+        if let Some(ref tags) = update.tags {
+            if has_fields {
+                qb.push(", ");
+            }
+            let tags_json = serde_json::to_value(tags).unwrap_or_default();
+            qb.push("tags = ");
+            qb.push_bind(tags_json);
+            has_fields = true;
+        }
+
+        // Add user_metadata if provided
+        if let Some(ref user_metadata) = update.user_metadata {
+            if has_fields {
+                qb.push(", ");
+            }
+            let metadata_json = serde_json::to_value(user_metadata).unwrap_or_default();
+            qb.push("user_metadata = ");
+            qb.push_bind(metadata_json);
+            has_fields = true;
+        }
+
+        // Add owner_id if provided
+        if let Some(ref owner_id) = update.owner_id {
+            if has_fields {
+                qb.push(", ");
+            }
+            qb.push("owner_id = ");
+            qb.push_bind(owner_id);
+            has_fields = true;
+        }
+
+        // If no fields to update, return early
+        if !has_fields {
+            warn!(
+                target: "rustfs::storage::database::repositories",
+                bucket = %bucket,
+                object_key = %object_key,
+                "No fields provided for update"
+            );
+            return Ok(0);
+        }
+
+        // Always update the updated_at timestamp
+        qb.push(", updated_at = CURRENT_TIMESTAMP");
+
+        // Add WHERE clause
+        qb.push(" WHERE bucket = ");
+        qb.push_bind(bucket);
+        qb.push(" AND object_key = ");
+        qb.push_bind(object_key);
+        qb.push(" AND is_deleted = false");
+
+        let result = qb.build().execute(pool).await.inspect_err(|err| {
+            error!(
+                target: "rustfs::storage::database::repositories",
+                bucket = %bucket,
+                object_key = %object_key,
+                error = %err,
+                "Failed to update S3 object metadata"
+            );
+        })?;
+
+        let rows_affected = result.rows_affected();
+
+        if rows_affected > 0 {
+            debug!(
+                target: "rustfs::storage::database::repositories",
+                bucket = %bucket,
+                object_key = %object_key,
+                rows_affected = rows_affected,
+                "Successfully updated S3 object metadata"
+            );
+        } else {
+            warn!(
+                target: "rustfs::storage::database::repositories",
+                bucket = %bucket,
+                object_key = %object_key,
+                "No S3 object found to update (may not exist or is deleted)"
+            );
+        }
+
+        Ok(rows_affected)
     }
 
     /// Query S3 objects with flexible filters
