@@ -18,5 +18,6 @@ pub mod ecfs;
 pub(crate) mod entity;
 pub(crate) mod helper;
 pub mod metadata_extractor;
+pub mod metadata_sync_hooks;
 pub mod options;
 pub mod tonic_service;

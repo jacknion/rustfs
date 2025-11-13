@@ -16,6 +16,7 @@ use crate::auth::get_condition_values;
 use crate::error::ApiError;
 use crate::storage::entity;
 use crate::storage::helper::OperationHelper;
+use crate::storage::metadata_sync_hooks::{sync_delete_object_metadata, sync_put_object_metadata};
 use crate::storage::options::{filter_object_metadata, get_content_sha256};
 use crate::storage::{
     access::{ReqInfo, authorize_request},
@@ -487,6 +488,9 @@ impl FS {
                     .put_object(&bucket, &fpath, &mut reader, &ObjectOptions::default())
                     .await
                     .map_err(ApiError::from)?;
+
+                // Sync metadata to database (non-blocking)
+                sync_put_object_metadata(&_obj_info, req.credentials.as_ref().map(|c| c.access_key.clone()));
 
                 let e_tag = _obj_info.etag.clone().map(|etag| to_s3s_etag(&etag));
 
@@ -1161,6 +1165,9 @@ impl S3 for FS {
         if obj_info.name.is_empty() {
             return Ok(S3Response::with_status(DeleteObjectOutput::default(), StatusCode::NO_CONTENT));
         }
+
+        // Sync metadata to database (non-blocking)
+        sync_delete_object_metadata(&bucket, &key);
 
         if obj_info.replication_status == ReplicationStatusType::Replica
             || obj_info.version_purge_status == VersionPurgeStatusType::Pending
@@ -2539,6 +2546,10 @@ impl S3 for FS {
             .put_object(&bucket, &key, &mut reader, &opts)
             .await
             .map_err(ApiError::from)?;
+
+        // Sync metadata to database (non-blocking)
+        sync_put_object_metadata(&obj_info, req.credentials.as_ref().map(|c| c.access_key.clone()));
+
         let e_tag = obj_info.etag.clone().map(|etag| to_s3s_etag(&etag));
 
         let repoptions =

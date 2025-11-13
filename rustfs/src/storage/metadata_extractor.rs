@@ -255,7 +255,7 @@ mod tests {
         let mut user_defined = HashMap::new();
         user_defined.insert("x-amz-server-side-encryption".to_string(), "AES256".to_string());
 
-        let mut obj_info = ObjectInfo {
+        let obj_info = ObjectInfo {
             bucket: "test".to_string(),
             name: "file.txt".to_string(),
             storage_class: None,
