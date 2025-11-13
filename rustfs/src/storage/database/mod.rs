@@ -114,6 +114,16 @@ pub async fn init_database_pool(config: DatabaseConfig) -> Result<(), sqlx::Erro
         "Database connection pool initialized successfully"
     );
 
+    // Auto-create database schema if tables don't exist
+    if let Err(e) = ensure_database_schema(&pool).await {
+        error!(
+            target: "rustfs::storage::database",
+            error = %e,
+            "Failed to ensure database schema"
+        );
+        return Err(e);
+    }
+
     // Store the pool in global state
     DB_POOL
         .set(Arc::new(pool))
@@ -157,6 +167,69 @@ fn mask_database_url(url: &str) -> String {
         }
     }
     "***".to_string()
+}
+
+/// Ensure database schema exists, create tables if they don't exist
+///
+/// # Arguments
+///
+/// * `pool` - Database connection pool
+///
+/// # Returns
+///
+/// Returns `Ok(())` if successful, otherwise returns an error
+async fn ensure_database_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
+    info!(
+        target: "rustfs::storage::database",
+        "Checking database schema..."
+    );
+
+    // Check if rustfs.s3_objects table exists (using rustfs schema)
+    let table_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT FROM information_schema.tables 
+            WHERE table_schema = 'rustfs' 
+            AND table_name = 's3_objects'
+        )",
+    )
+    .fetch_one(pool)
+    .await?;
+
+    if table_exists {
+        info!(
+            target: "rustfs::storage::database",
+            "Database schema already exists, skipping creation"
+        );
+        return Ok(());
+    }
+
+    warn!(
+        target: "rustfs::storage::database",
+        "Schema 'rustfs' or table 's3_objects' not found, creating database schema..."
+    );
+
+    // Execute schema creation SQL
+    // Using include_str! to embed the SQL file at compile time
+    let schema_sql = include_str!("../../../../scripts/s3_metadata_schema.sql");
+    
+    // Split and execute SQL statements (PostgreSQL allows multi-statement execution)
+    sqlx::query(schema_sql)
+        .execute(pool)
+        .await
+        .inspect_err(|err| {
+            error!(
+                target: "rustfs::storage::database",
+                error = %err,
+                "Failed to create database schema"
+            );
+        })?;
+
+    info!(
+        target: "rustfs::storage::database",
+        "Database schema created successfully"
+    );
+
+    Ok(())
 }
 
 #[cfg(test)]

@@ -93,7 +93,7 @@ impl S3ObjectRepository {
 
         let result = sqlx::query_scalar::<_, i64>(
             r#"
-            INSERT INTO s3_objects (
+            INSERT INTO rustfs.s3_objects (
                 bucket, object_key, version_id, size_bytes, content_type, etag,
                 storage_class, encryption, tags, user_metadata, owner_id, last_modified
             )
@@ -167,7 +167,7 @@ impl S3ObjectRepository {
     /// Returns the number of updated rows (0 if object not found, 1 if updated)
     pub async fn update(pool: &PgPool, bucket: &str, object_key: &str, update: &UpdateS3Object) -> Result<u64, sqlx::Error> {
         // Build dynamic UPDATE query with only provided fields
-        let mut qb: QueryBuilder<Postgres> = QueryBuilder::new("UPDATE s3_objects SET ");
+        let mut qb: QueryBuilder<Postgres> = QueryBuilder::new("UPDATE rustfs.s3_objects SET ");
 
         let mut has_fields = false;
 
@@ -302,9 +302,9 @@ impl S3ObjectRepository {
         let start = Instant::now();
 
         // Build dynamic query with window function for total count
-        // SELECT *, COUNT(*) OVER() AS total_count FROM s3_objects WHERE ...
+        // SELECT *, COUNT(*) OVER() AS total_count FROM rustfs.s3_objects WHERE ...
         let mut qb: QueryBuilder<Postgres> =
-            QueryBuilder::new("SELECT *, COUNT(*) OVER() AS total_count FROM s3_objects WHERE 1=1");
+            QueryBuilder::new("SELECT *, COUNT(*) OVER() AS total_count FROM rustfs.s3_objects WHERE 1=1");
 
         // Apply filters
         if let Some(ref bucket) = query.bucket {
@@ -457,7 +457,7 @@ impl S3ObjectRepository {
     pub async fn delete(pool: &PgPool, bucket: &str, object_key: &str) -> Result<u64, sqlx::Error> {
         let result = sqlx::query(
             r#"
-            UPDATE s3_objects
+            UPDATE rustfs.s3_objects
             SET is_deleted = true, updated_at = CURRENT_TIMESTAMP
             WHERE bucket = $1 AND object_key = $2 AND is_deleted = false
             "#,
@@ -513,7 +513,7 @@ impl S3ObjectRepository {
     pub async fn purge_deleted(pool: &PgPool, days_old: i32) -> Result<u64, sqlx::Error> {
         let result = sqlx::query(
             r#"
-            DELETE FROM s3_objects
+            DELETE FROM rustfs.s3_objects
             WHERE is_deleted = true
             AND updated_at < CURRENT_TIMESTAMP - INTERVAL '1 day' * $1
             "#,
