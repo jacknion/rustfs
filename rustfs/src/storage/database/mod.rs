@@ -38,7 +38,8 @@ pub use repositories::S3ObjectRepository;
 
 // Re-export sync service
 pub use sync_service::{
-    MetadataSyncConfig, MetadataSyncEvent, init_metadata_sync_service, send_sync_event, shutdown_metadata_sync_service,
+    MetadataSyncConfig, MetadataSyncEvent, SyncServiceSnapshot, get_sync_stats, init_metadata_sync_service, send_sync_event,
+    shutdown_metadata_sync_service,
 };
 
 /// Global database connection pool

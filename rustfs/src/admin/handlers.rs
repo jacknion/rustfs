@@ -87,6 +87,7 @@ pub mod rebalance;
 pub mod s3_metadata;
 pub mod service_account;
 pub mod sts;
+pub mod sync_health;
 pub mod tier;
 pub mod trace;
 pub mod user;

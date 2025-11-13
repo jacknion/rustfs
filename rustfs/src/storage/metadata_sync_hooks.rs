@@ -46,13 +46,15 @@ pub fn sync_put_object_metadata(obj_info: &ObjectInfo, owner_id: Option<String>)
     );
 
     // Send event to sync service (non-blocking)
-    if let Err(e) = send_sync_event(MetadataSyncEvent::Upsert(Box::new(create_obj))) {
+    if let Err(e) = send_sync_event(MetadataSyncEvent::Upsert(Box::new(create_obj.clone()))) {
         warn!(
             target: "rustfs::storage::metadata_sync_hooks",
             error = %e,
             bucket = %obj_info.bucket,
             object_key = %obj_info.name,
-            "Failed to send metadata sync event for put object"
+            size = obj_info.size,
+            error_type = if e.contains("Channel full") { "channel_full" } else { "channel_closed" },
+            "Failed to send metadata sync event for put object - metadata will not be searchable via query API"
         );
     }
 }
@@ -83,7 +85,8 @@ pub fn sync_delete_object_metadata(bucket: &str, object_key: &str) {
             error = %e,
             bucket = %bucket,
             object_key = %object_key,
-            "Failed to send metadata sync event for delete object"
+            error_type = if e.contains("Channel full") { "channel_full" } else { "channel_closed" },
+            "Failed to send metadata sync event for delete object - stale metadata may remain in query results"
         );
     }
 }

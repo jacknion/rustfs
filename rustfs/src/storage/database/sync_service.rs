@@ -18,11 +18,31 @@
 
 use crate::storage::database::{CreateS3Object, get_database_pool, repositories::S3ObjectRepository};
 use once_cell::sync::OnceCell;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 /// Global metadata sync service sender
 static SYNC_SERVICE_TX: OnceCell<mpsc::Sender<MetadataSyncEvent>> = OnceCell::new();
+
+/// Global sync service statistics
+static SYNC_STATS: OnceCell<Arc<SyncServiceStats>> = OnceCell::new();
+
+/// Statistics for metadata sync service
+#[derive(Debug, Default)]
+pub struct SyncServiceStats {
+    /// Total upsert events processed
+    pub upsert_success: AtomicU64,
+    /// Total upsert failures
+    pub upsert_failed: AtomicU64,
+    /// Total delete events processed
+    pub delete_success: AtomicU64,
+    /// Total delete failures
+    pub delete_failed: AtomicU64,
+    /// Total events dropped due to channel full
+    pub events_dropped: AtomicU64,
+}
 
 /// Events for metadata synchronization
 #[derive(Debug, Clone)]
@@ -83,6 +103,12 @@ impl Default for MetadataSyncConfig {
 pub fn init_metadata_sync_service(config: MetadataSyncConfig) -> Result<(), String> {
     let (tx, rx) = mpsc::channel(config.max_queue_size);
 
+    // Initialize statistics
+    let stats = Arc::new(SyncServiceStats::default());
+    SYNC_STATS
+        .set(stats.clone())
+        .map_err(|_| "Sync stats already initialized".to_string())?;
+
     // Store the sender in global state
     SYNC_SERVICE_TX
         .set(tx)
@@ -100,7 +126,7 @@ pub fn init_metadata_sync_service(config: MetadataSyncConfig) -> Result<(), Stri
 
     // Spawn background worker
     tokio::spawn(async move {
-        metadata_sync_worker(rx, config).await;
+        sync_worker(rx, config, stats).await;
     });
 
     Ok(())
@@ -121,11 +147,17 @@ pub fn send_sync_event(event: MetadataSyncEvent) -> Result<(), String> {
     if let Some(tx) = SYNC_SERVICE_TX.get() {
         tx.try_send(event).map_err(|e| match e {
             mpsc::error::TrySendError::Full(_) => {
+                // Record dropped event
+                if let Some(stats) = SYNC_STATS.get() {
+                    stats.events_dropped.fetch_add(1, Ordering::Relaxed);
+                }
+
                 warn!(
                     target: "rustfs::storage::database::sync_service",
                     "Metadata sync queue is full, dropping event to prevent memory overflow"
                 );
-                "Sync queue full".to_string()
+                "Channel full - metadata sync queue is overloaded. Consider increasing max_queue_size or reducing write rate."
+                    .to_string()
             }
             mpsc::error::TrySendError::Closed(_) => "Sync service closed".to_string(),
         })?;
@@ -155,8 +187,58 @@ pub async fn shutdown_metadata_sync_service() {
     }
 }
 
-/// Background worker that processes metadata sync events
-async fn metadata_sync_worker(mut rx: mpsc::Receiver<MetadataSyncEvent>, config: MetadataSyncConfig) {
+/// Get current sync service statistics
+///
+/// Returns None if service is not initialized
+pub fn get_sync_stats() -> Option<SyncServiceSnapshot> {
+    SYNC_STATS.get().map(|stats| SyncServiceSnapshot {
+        upsert_success: stats.upsert_success.load(Ordering::Relaxed),
+        upsert_failed: stats.upsert_failed.load(Ordering::Relaxed),
+        delete_success: stats.delete_success.load(Ordering::Relaxed),
+        delete_failed: stats.delete_failed.load(Ordering::Relaxed),
+        events_dropped: stats.events_dropped.load(Ordering::Relaxed),
+    })
+}
+
+/// Snapshot of sync service statistics
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SyncServiceSnapshot {
+    pub upsert_success: u64,
+    pub upsert_failed: u64,
+    pub delete_success: u64,
+    pub delete_failed: u64,
+    pub events_dropped: u64,
+}
+
+impl SyncServiceSnapshot {
+    /// Calculate total events processed
+    pub fn total_processed(&self) -> u64 {
+        self.upsert_success + self.delete_success
+    }
+
+    /// Calculate total failures
+    pub fn total_failed(&self) -> u64 {
+        self.upsert_failed + self.delete_failed
+    }
+
+    /// Calculate success rate (0.0 to 1.0)
+    pub fn success_rate(&self) -> f64 {
+        let total = self.total_processed() + self.total_failed();
+        if total == 0 {
+            1.0
+        } else {
+            self.total_processed() as f64 / total as f64
+        }
+    }
+
+    /// Check if service is healthy (success rate > 95%)
+    pub fn is_healthy(&self) -> bool {
+        self.success_rate() > 0.95 && self.events_dropped < 1000
+    }
+}
+
+/// Background worker that processes sync events
+async fn sync_worker(mut rx: mpsc::Receiver<MetadataSyncEvent>, config: MetadataSyncConfig, stats: Arc<SyncServiceStats>) {
     let mut batch_upserts: Vec<CreateS3Object> = Vec::with_capacity(config.batch_size);
     let mut batch_deletes: Vec<(String, String)> = Vec::with_capacity(config.batch_size);
 
@@ -181,21 +263,21 @@ async fn metadata_sync_worker(mut rx: mpsc::Receiver<MetadataSyncEvent>, config:
                         );
 
                         // Flush remaining events
-                        flush_batch(&mut batch_upserts, &mut batch_deletes, &config).await;
+                        flush_batch(&mut batch_upserts, &mut batch_deletes, &config, &stats).await;
                         break;
                     }
                 }
 
                 // Flush if batch size reached
                 if batch_upserts.len() >= config.batch_size || batch_deletes.len() >= config.batch_size {
-                    flush_batch(&mut batch_upserts, &mut batch_deletes, &config).await;
+                    flush_batch(&mut batch_upserts, &mut batch_deletes, &config, &stats).await;
                 }
             }
 
             // Periodic flush based on time interval
             _ = flush_interval.tick() => {
                 if !batch_upserts.is_empty() || !batch_deletes.is_empty() {
-                    flush_batch(&mut batch_upserts, &mut batch_deletes, &config).await;
+                    flush_batch(&mut batch_upserts, &mut batch_deletes, &config, &stats).await;
                 }
             }
         }
@@ -208,7 +290,12 @@ async fn metadata_sync_worker(mut rx: mpsc::Receiver<MetadataSyncEvent>, config:
 }
 
 /// Flush accumulated batches to database with retry mechanism
-async fn flush_batch(upserts: &mut Vec<CreateS3Object>, deletes: &mut Vec<(String, String)>, config: &MetadataSyncConfig) {
+async fn flush_batch(
+    upserts: &mut Vec<CreateS3Object>,
+    deletes: &mut Vec<(String, String)>,
+    config: &MetadataSyncConfig,
+    stats: &Arc<SyncServiceStats>,
+) {
     if upserts.is_empty() && deletes.is_empty() {
         return;
     }
@@ -237,9 +324,13 @@ async fn flush_batch(upserts: &mut Vec<CreateS3Object>, deletes: &mut Vec<(Strin
             match retry_database_operation(|| S3ObjectRepository::upsert(pool, &obj), config.max_retries, config.retry_delay_ms)
                 .await
             {
-                Ok(_) => success_count += 1,
+                Ok(_) => {
+                    success_count += 1;
+                    stats.upsert_success.fetch_add(1, Ordering::Relaxed);
+                }
                 Err(e) => {
                     failure_count += 1;
+                    stats.upsert_failed.fetch_add(1, Ordering::Relaxed);
                     error!(
                         target: "rustfs::storage::database::sync_service",
                         bucket = %obj.bucket,
@@ -275,9 +366,13 @@ async fn flush_batch(upserts: &mut Vec<CreateS3Object>, deletes: &mut Vec<(Strin
             )
             .await
             {
-                Ok(_) => success_count += 1,
+                Ok(_) => {
+                    success_count += 1;
+                    stats.delete_success.fetch_add(1, Ordering::Relaxed);
+                }
                 Err(e) => {
                     failure_count += 1;
+                    stats.delete_failed.fetch_add(1, Ordering::Relaxed);
                     error!(
                         target: "rustfs::storage::database::sync_service",
                         bucket = %bucket,

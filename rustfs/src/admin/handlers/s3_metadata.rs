@@ -86,9 +86,23 @@ impl Operation for QueryS3MetadataHandler {
             error!(
                 target: "rustfs::admin::handlers::s3_metadata",
                 error = %e,
+                bucket = ?query.bucket,
+                prefix = ?query.prefix,
                 "Failed to query S3 metadata"
             );
-            s3_error!(InternalError, "Database query failed: {}", e)
+
+            // Provide user-friendly error messages
+            let error_msg = if e.to_string().contains("connection") {
+                "Database connection failed. Please try again later."
+            } else if e.to_string().contains("timeout") {
+                "Database query timeout. Please refine your search criteria."
+            } else if e.to_string().contains("syntax") {
+                "Invalid query parameters. Please check your request."
+            } else {
+                "Database query failed. Please contact administrator if this persists."
+            };
+
+            s3_error!(InternalError, "{} Error: {}", error_msg, e)
         })?;
 
         debug!(
@@ -185,9 +199,23 @@ impl Operation for QueryS3MetadataByTagsHandler {
             error!(
                 target: "rustfs::admin::handlers::s3_metadata",
                 error = %e,
+                tags = ?query.tags,
+                bucket = ?query.bucket,
                 "Failed to query S3 metadata by tags"
             );
-            s3_error!(InternalError, "Database query failed: {}", e)
+
+            // Provide user-friendly error messages
+            let error_msg = if e.to_string().contains("connection") {
+                "Database connection failed. Please try again later."
+            } else if e.to_string().contains("timeout") {
+                "Database query timeout. Please refine your search criteria."
+            } else if e.to_string().contains("invalid") || e.to_string().contains("syntax") {
+                "Invalid tag query. Please check your tag format."
+            } else {
+                "Database query failed. Please contact administrator if this persists."
+            };
+
+            s3_error!(InternalError, "{} Error: {}", error_msg, e)
         })?;
 
         debug!(
