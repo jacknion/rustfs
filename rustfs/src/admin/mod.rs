@@ -30,6 +30,7 @@ use handlers::{
     group, kms, kms_dynamic, kms_keys, policies, pools,
     profile::{TriggerProfileCPU, TriggerProfileMemory},
     rebalance,
+    s3_metadata::{QueryS3MetadataByTagsHandler, QueryS3MetadataHandler},
     service_account::{AddServiceAccount, DeleteServiceAccount, InfoServiceAccount, ListServiceAccount, UpdateServiceAccount},
     sts, tier, user,
 };
@@ -59,6 +60,18 @@ pub fn make_admin_route(console_enabled: bool) -> std::io::Result<impl S3Route> 
         Method::GET,
         format!("{}{}", ADMIN_PREFIX, "/v3/database/example").as_str(),
         AdminOperation(&DatabaseExampleQueryHandler {}),
+    )?;
+
+    // S3 metadata query endpoints (requires database configuration)
+    r.insert(
+        Method::GET,
+        format!("{}{}", ADMIN_PREFIX, "/v3/s3/metadata/query").as_str(),
+        AdminOperation(&QueryS3MetadataHandler),
+    )?;
+    r.insert(
+        Method::POST,
+        format!("{}{}", ADMIN_PREFIX, "/v3/s3/metadata/query-by-tags").as_str(),
+        AdminOperation(&QueryS3MetadataByTagsHandler),
     )?;
 
     // 1
