@@ -1422,6 +1422,9 @@ impl S3 for FS {
 
         for dobjs in delete_results.iter() {
             if let Some(dobj) = &dobjs.delete_object {
+                // Sync metadata deletion to database (non-blocking)
+                sync_delete_object_metadata(&bucket, &dobj.object_name);
+
                 if replicate_deletes
                     && (dobj.delete_marker_replication_status() == ReplicationStatusType::Pending
                         || dobj.version_purge_status() == VersionPurgeStatusType::Pending)
