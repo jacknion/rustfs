@@ -84,6 +84,7 @@ pub mod policies;
 pub mod pools;
 pub mod profile;
 pub mod rebalance;
+pub mod s3_metadata;
 pub mod service_account;
 pub mod sts;
 pub mod tier;
