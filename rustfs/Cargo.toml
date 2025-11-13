@@ -89,6 +89,9 @@ serde.workspace = true
 serde_json.workspace = true
 serde_urlencoded = { workspace = true }
 
+# Database
+sqlx = { workspace = true }
+
 # Cryptography and Security
 rustls = { workspace = true }
 
@@ -109,6 +112,7 @@ hex-simd.workspace = true
 matchit = { workspace = true }
 md5.workspace = true
 mime_guess = { workspace = true }
+once_cell = { workspace = true }
 pin-project-lite.workspace = true
 rust-embed = { workspace = true, features = ["interpolate-folder-path"] }
 s3s.workspace = true

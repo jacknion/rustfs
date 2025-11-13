@@ -74,6 +74,7 @@ use url::Host;
 // use url::UrlQuery;
 
 pub mod bucket_meta;
+pub mod database;
 pub mod event;
 pub mod group;
 pub mod kms;

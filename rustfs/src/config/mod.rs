@@ -112,6 +112,14 @@ pub struct Opt {
     /// Default KMS key ID for encryption
     #[arg(long, env = "RUSTFS_KMS_DEFAULT_KEY_ID")]
     pub kms_default_key_id: Option<String>,
+
+    /// PostgreSQL database URL for metadata storage
+    #[arg(long, env = "RUSTFS_DATABASE_URL")]
+    pub database_url: Option<String>,
+
+    /// Maximum number of database connections in the pool
+    #[arg(long, default_value_t = 10, env = "RUSTFS_DATABASE_MAX_CONNECTIONS")]
+    pub database_max_connections: u32,
 }
 
 // lazy_static::lazy_static! {

@@ -12,10 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod access;
-pub mod database;
-pub mod ecfs;
-pub(crate) mod entity;
-pub(crate) mod helper;
-pub mod options;
-pub mod tonic_service;
+//! Repository module for data access
+
+mod s3_objects;
+
+pub use s3_objects::S3ObjectRepository;

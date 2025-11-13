@@ -1,0 +1,66 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: rustfs-postgres
+    environment:
+      POSTGRES_USER: rustfs_user
+      POSTGRES_PASSWORD: rustfs_password
+      POSTGRES_DB: rustfs_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rustfs_user -d rustfs_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - rustfs-network
+
+  # RustFS Server with Database Integration
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: rustfs-server
+    environment:
+      # Database Configuration
+      RUSTFS_DATABASE_URL: "postgres://rustfs_user:rustfs_password@postgres:5432/rustfs_db"
+      RUSTFS_DATABASE_MAX_CONNECTIONS: "20"
+      
+      # Basic Configuration
+      RUSTFS_VOLUMES: "/data"
+      RUSTFS_ADDRESS: "0.0.0.0:9000"
+      RUSTFS_ACCESS_KEY: "rustfsadmin"
+      RUSTFS_SECRET_KEY: "rustfsadmin"
+      
+      # Console Configuration
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_CONSOLE_ADDRESS: "0.0.0.0:9001"
+      
+      # Optional: Observability
+      # RUSTFS_OBS_ENDPOINT: "http://jaeger:4317"
+    ports:
+      - "9000:9000"  # RustFS API
+      - "9001:9001"  # RustFS Console
+    volumes:
+      - rustfs_data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - rustfs-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+  rustfs_data:
+    driver: local
+
+networks:
+  rustfs-network:
+    driver: bridge

@@ -25,6 +25,7 @@ mod console_test;
 use handlers::{
     GetReplicationMetricsHandler, HealthCheckHandler, ListRemoteTargetHandler, RemoveRemoteTargetHandler, SetRemoteTargetHandler,
     bucket_meta,
+    database::{DatabaseExampleQueryHandler, DatabaseHealthHandler},
     event::{ListNotificationTargets, ListTargetsArns, NotificationTarget, RemoveNotificationTarget},
     group, kms, kms_dynamic, kms_keys, policies, pools,
     profile::{TriggerProfileCPU, TriggerProfileMemory},
@@ -47,6 +48,18 @@ pub fn make_admin_route(console_enabled: bool) -> std::io::Result<impl S3Route> 
     r.insert(Method::GET, "/health", AdminOperation(&HealthCheckHandler {}))?;
     r.insert(Method::GET, "/profile/cpu", AdminOperation(&TriggerProfileCPU {}))?;
     r.insert(Method::GET, "/profile/memory", AdminOperation(&TriggerProfileMemory {}))?;
+
+    // Database endpoints (optional, only work when database is configured)
+    r.insert(
+        Method::GET,
+        format!("{}{}", ADMIN_PREFIX, "/v3/database/health").as_str(),
+        AdminOperation(&DatabaseHealthHandler {}),
+    )?;
+    r.insert(
+        Method::GET,
+        format!("{}{}", ADMIN_PREFIX, "/v3/database/example").as_str(),
+        AdminOperation(&DatabaseExampleQueryHandler {}),
+    )?;
 
     // 1
     r.insert(Method::POST, "/", AdminOperation(&sts::AssumeRoleHandle {}))?;

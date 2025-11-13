@@ -137,6 +137,9 @@ serde_json = { version = "1.0.145", features = ["raw_value"] }
 serde_urlencoded = "0.7.1"
 schemars = "1.1.0"
 
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "macros", "migrate"] }
+
 # Cryptography and Security
 aes-gcm = { version = "0.11.0-rc.2", features = ["rand_core"] }
 argon2 = { version = "0.6.0-rc.2", features = ["std"] }

@@ -30,6 +30,7 @@ use crate::server::{
     SHUTDOWN_TIMEOUT, ServiceState, ServiceStateManager, ShutdownSignal, init_event_notifier, shutdown_event_notifier,
     start_audit_system, start_http_server, stop_audit_system, wait_for_shutdown,
 };
+use crate::storage::database::{DatabaseConfig, init_database_pool, shutdown_database_pool};
 use crate::storage::ecfs::{process_lambda_configurations, process_queue_configurations, process_topic_configurations};
 use chrono::Datelike;
 use clap::Parser;
@@ -256,6 +257,37 @@ async fn run(opt: config::Opt) -> Result<()> {
     // Initialize KMS system if enabled
     init_kms_system(&opt).await?;
 
+    // Initialize database connection pool if database URL is configured
+    if let Some(database_url) = &opt.database_url {
+        info!(
+            target: "rustfs::main::run",
+            "Database URL configured, initializing connection pool..."
+        );
+        let db_config = DatabaseConfig {
+            url: database_url.clone(),
+            max_connections: opt.database_max_connections,
+            connect_timeout: std::time::Duration::from_secs(30),
+            idle_timeout: std::time::Duration::from_secs(600),
+        };
+        init_database_pool(db_config).await.map_err(|e| {
+            error!(
+                target: "rustfs::main::run",
+                error = %e,
+                "Failed to initialize database connection pool"
+            );
+            Error::other(format!("Failed to initialize database: {e}"))
+        })?;
+        info!(
+            target: "rustfs::main::run",
+            "Database connection pool initialized successfully"
+        );
+    } else {
+        info!(
+            target: "rustfs::main::run",
+            "No database URL configured, skipping database initialization"
+        );
+    }
+
     // Initialize event notifier
     init_event_notifier().await;
     // Start the audit system
@@ -408,6 +440,13 @@ async fn handle_shutdown(
         "Shutting down event notifier system..."
     );
     shutdown_event_notifier().await;
+
+    // Shutdown database connection pool if it was initialized
+    info!(
+        target: "rustfs::main::handle_shutdown",
+        "Shutting down database connection pool..."
+    );
+    shutdown_database_pool().await;
 
     // Stop the audit system
     info!(
