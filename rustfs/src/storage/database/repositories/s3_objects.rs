@@ -15,10 +15,59 @@
 //! Repository for S3 object metadata operations
 
 use crate::storage::database::models::{CreateS3Object, S3Object, S3ObjectMetadata, S3ObjectQuery, S3ObjectQueryResponse};
+use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use std::collections::HashMap;
 use std::time::Instant;
 use tracing::{debug, error, warn};
+
+/// Intermediate struct for window function query results
+#[derive(Debug, sqlx::FromRow)]
+struct S3ObjectWithCount {
+    // S3Object fields
+    id: i64,
+    bucket: String,
+    object_key: String,
+    version_id: Option<String>,
+    size_bytes: i64,
+    content_type: Option<String>,
+    etag: Option<String>,
+    storage_class: Option<String>,
+    encryption: Option<String>,
+    tags: Option<sqlx::types::Json<HashMap<String, String>>>,
+    user_metadata: Option<sqlx::types::Json<HashMap<String, String>>>,
+    owner_id: Option<String>,
+    is_deleted: bool,
+    last_modified: DateTime<Utc>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+
+    // Window function result
+    total_count: Option<i64>,
+}
+
+impl From<S3ObjectWithCount> for S3Object {
+    fn from(obj: S3ObjectWithCount) -> Self {
+        S3Object {
+            id: obj.id,
+            bucket: obj.bucket,
+            object_key: obj.object_key,
+            version_id: obj.version_id,
+            size_bytes: obj.size_bytes,
+            content_type: obj.content_type,
+            etag: obj.etag,
+            storage_class: obj.storage_class,
+            encryption: obj.encryption,
+            tags: obj.tags,
+            user_metadata: obj.user_metadata,
+            owner_id: obj.owner_id,
+            is_deleted: obj.is_deleted,
+            last_modified: obj.last_modified,
+            created_at: obj.created_at,
+            updated_at: obj.updated_at,
+        }
+    }
+}
 
 /// Repository for S3 object metadata database operations
 pub struct S3ObjectRepository;
@@ -101,6 +150,8 @@ impl S3ObjectRepository {
 
     /// Query S3 objects with flexible filters
     ///
+    /// Uses window function to get total count in a single query (N+1 optimization)
+    ///
     /// # Arguments
     ///
     /// * `pool` - Database connection pool
@@ -112,8 +163,10 @@ impl S3ObjectRepository {
     pub async fn query(pool: &PgPool, query: &S3ObjectQuery) -> Result<S3ObjectQueryResponse, sqlx::Error> {
         let start = Instant::now();
 
-        // Build dynamic query
-        let mut qb: QueryBuilder<Postgres> = QueryBuilder::new("SELECT * FROM s3_objects WHERE 1=1");
+        // Build dynamic query with window function for total count
+        // SELECT *, COUNT(*) OVER() AS total_count FROM s3_objects WHERE ...
+        let mut qb: QueryBuilder<Postgres> =
+            QueryBuilder::new("SELECT *, COUNT(*) OVER() AS total_count FROM s3_objects WHERE 1=1");
 
         // Apply filters
         if let Some(ref bucket) = query.bucket {
@@ -188,8 +241,8 @@ impl S3ObjectRepository {
             qb.push_bind(offset);
         }
 
-        // Execute query
-        let objects: Vec<S3Object> = qb.build_query_as().fetch_all(pool).await.inspect_err(|err| {
+        // Execute query (single query with window function)
+        let results: Vec<S3ObjectWithCount> = qb.build_query_as().fetch_all(pool).await.inspect_err(|err| {
             error!(
                 target: "rustfs::storage::database::repositories",
                 error = %err,
@@ -197,8 +250,11 @@ impl S3ObjectRepository {
             );
         })?;
 
-        // Get total count (for pagination metadata)
-        let total_count = Self::count_query(pool, query).await?;
+        // Extract total count from first row (window function gives same count for all rows)
+        let total_count = results.first().and_then(|r| r.total_count).unwrap_or(0);
+
+        // Convert to S3Object (strip total_count field)
+        let objects: Vec<S3Object> = results.into_iter().map(S3Object::from).collect();
 
         let query_time_ms = start.elapsed().as_millis() as u64;
 
@@ -207,7 +263,8 @@ impl S3ObjectRepository {
             returned = objects.len(),
             total = total_count,
             query_time_ms = query_time_ms,
-            "Successfully queried S3 objects"
+            optimization = "window_function",
+            "Successfully queried S3 objects (N+1 optimized)"
         );
 
         Ok(S3ObjectQueryResponse {
@@ -219,72 +276,6 @@ impl S3ObjectRepository {
             },
             objects,
         })
-    }
-
-    /// Count total matching records for a query (used for pagination metadata)
-    async fn count_query(pool: &PgPool, query: &S3ObjectQuery) -> Result<i64, sqlx::Error> {
-        let mut qb: QueryBuilder<Postgres> = QueryBuilder::new("SELECT COUNT(*) FROM s3_objects WHERE 1=1");
-
-        // Apply the same filters as the main query
-        if let Some(ref bucket) = query.bucket {
-            qb.push(" AND bucket = ");
-            qb.push_bind(bucket);
-        }
-
-        if let Some(ref prefix) = query.prefix {
-            qb.push(" AND object_key LIKE ");
-            qb.push_bind(format!("{}%", prefix));
-        }
-
-        if let Some(ref storage_class) = query.storage_class {
-            qb.push(" AND storage_class = ");
-            qb.push_bind(storage_class);
-        }
-
-        if let Some(ref encryption) = query.encryption {
-            qb.push(" AND encryption = ");
-            qb.push_bind(encryption);
-        }
-
-        if let Some(ref owner_id) = query.owner_id {
-            qb.push(" AND owner_id = ");
-            qb.push_bind(owner_id);
-        }
-
-        if let Some(min_size) = query.min_size {
-            qb.push(" AND size_bytes >= ");
-            qb.push_bind(min_size);
-        }
-
-        if let Some(max_size) = query.max_size {
-            qb.push(" AND size_bytes <= ");
-            qb.push_bind(max_size);
-        }
-
-        if let Some(ref modified_after) = query.modified_after {
-            qb.push(" AND last_modified >= ");
-            qb.push_bind(modified_after);
-        }
-
-        if let Some(ref modified_before) = query.modified_before {
-            qb.push(" AND last_modified <= ");
-            qb.push_bind(modified_before);
-        }
-
-        if !query.include_deleted {
-            qb.push(" AND is_deleted = false");
-        }
-
-        if let Some(ref tags) = query.tags {
-            if !tags.is_empty() {
-                let tags_json = serde_json::to_value(tags).unwrap_or_default();
-                qb.push(" AND tags @> ");
-                qb.push_bind(tags_json);
-            }
-        }
-
-        let count: i64 = qb.build_query_scalar().fetch_one(pool).await?;
-        Ok(count)
     }
 
     /// Find S3 objects by tags (shortcut method for tag-based queries)
