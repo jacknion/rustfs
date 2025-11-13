@@ -22,7 +22,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 /// Global metadata sync service sender
-static SYNC_SERVICE_TX: OnceCell<mpsc::UnboundedSender<MetadataSyncEvent>> = OnceCell::new();
+static SYNC_SERVICE_TX: OnceCell<mpsc::Sender<MetadataSyncEvent>> = OnceCell::new();
 
 /// Events for metadata synchronization
 #[derive(Debug, Clone)]
@@ -45,6 +45,9 @@ pub struct MetadataSyncConfig {
 
     /// Maximum time to wait before flushing (in seconds)
     pub flush_interval_secs: u64,
+
+    /// Maximum queue size for backpressure control
+    pub max_queue_size: usize,
 }
 
 impl Default for MetadataSyncConfig {
@@ -52,6 +55,7 @@ impl Default for MetadataSyncConfig {
         Self {
             batch_size: 100,
             flush_interval_secs: 1,
+            max_queue_size: 10000,
         }
     }
 }
@@ -69,7 +73,7 @@ impl Default for MetadataSyncConfig {
 ///
 /// Returns `Ok(())` if successful
 pub fn init_metadata_sync_service(config: MetadataSyncConfig) -> Result<(), String> {
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::channel(config.max_queue_size);
 
     // Store the sender in global state
     SYNC_SERVICE_TX
@@ -80,6 +84,7 @@ pub fn init_metadata_sync_service(config: MetadataSyncConfig) -> Result<(), Stri
         target: "rustfs::storage::database::sync_service",
         batch_size = config.batch_size,
         flush_interval_secs = config.flush_interval_secs,
+        max_queue_size = config.max_queue_size,
         "Metadata sync service initialized"
     );
 
@@ -104,7 +109,16 @@ pub fn init_metadata_sync_service(config: MetadataSyncConfig) -> Result<(), Stri
 /// Returns `Ok(())` if the event was queued successfully
 pub fn send_sync_event(event: MetadataSyncEvent) -> Result<(), String> {
     if let Some(tx) = SYNC_SERVICE_TX.get() {
-        tx.send(event).map_err(|e| format!("Failed to send sync event: {}", e))?;
+        tx.try_send(event).map_err(|e| match e {
+            mpsc::error::TrySendError::Full(_) => {
+                warn!(
+                    target: "rustfs::storage::database::sync_service",
+                    "Metadata sync queue is full, dropping event to prevent memory overflow"
+                );
+                "Sync queue full".to_string()
+            }
+            mpsc::error::TrySendError::Closed(_) => "Sync service closed".to_string(),
+        })?;
         Ok(())
     } else {
         Err("Metadata sync service not initialized".to_string())
@@ -122,7 +136,7 @@ pub async fn shutdown_metadata_sync_service() {
         );
 
         // Send shutdown signal (ignore errors if channel is closed)
-        let _ = tx.send(MetadataSyncEvent::Shutdown);
+        drop(tx.send(MetadataSyncEvent::Shutdown));
     } else {
         warn!(
             target: "rustfs::storage::database::sync_service",
@@ -132,7 +146,7 @@ pub async fn shutdown_metadata_sync_service() {
 }
 
 /// Background worker that processes metadata sync events
-async fn metadata_sync_worker(mut rx: mpsc::UnboundedReceiver<MetadataSyncEvent>, config: MetadataSyncConfig) {
+async fn metadata_sync_worker(mut rx: mpsc::Receiver<MetadataSyncEvent>, config: MetadataSyncConfig) {
     let mut batch_upserts: Vec<CreateS3Object> = Vec::with_capacity(config.batch_size);
     let mut batch_deletes: Vec<(String, String)> = Vec::with_capacity(config.batch_size);
 

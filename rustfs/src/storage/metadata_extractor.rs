@@ -49,7 +49,18 @@ impl MetadataExtractor {
         // Convert mod_time to DateTime<Utc>
         let last_modified = obj_info
             .mod_time
-            .map(|t| DateTime::from_timestamp(t.unix_timestamp(), t.nanosecond()).unwrap_or_else(Utc::now))
+            .and_then(|t| {
+                DateTime::from_timestamp(t.unix_timestamp(), t.nanosecond()).or_else(|| {
+                    warn!(
+                        target: "rustfs::storage::metadata_extractor",
+                        bucket = %obj_info.bucket,
+                        object_key = %obj_info.name,
+                        unix_timestamp = t.unix_timestamp(),
+                        "Invalid timestamp detected, using current time as fallback"
+                    );
+                    None
+                })
+            })
             .unwrap_or_else(Utc::now);
 
         // Convert version_id to string

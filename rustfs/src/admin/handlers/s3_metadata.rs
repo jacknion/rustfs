@@ -68,7 +68,18 @@ impl Operation for QueryS3MetadataHandler {
         );
 
         // Parse query parameters manually
-        let query = parse_query_params(query_str).map_err(|e| s3_error!(InvalidRequest, "Invalid query parameters: {}", e))?;
+        let mut query =
+            parse_query_params(query_str).map_err(|e| s3_error!(InvalidRequest, "Invalid query parameters: {}", e))?;
+
+        // Apply default and maximum limits to prevent unbounded queries
+        const DEFAULT_LIMIT: i64 = 100;
+        const MAX_LIMIT: i64 = 1000;
+
+        if query.limit.is_none() {
+            query.limit = Some(DEFAULT_LIMIT);
+        } else {
+            query.limit = Some(query.limit.unwrap().clamp(1, MAX_LIMIT));
+        }
 
         // Execute query
         let response = S3ObjectRepository::query(pool, &query).await.map_err(|e| {
@@ -151,12 +162,20 @@ impl Operation for QueryS3MetadataByTagsHandler {
             "Parsed query by tags request"
         );
 
-        // Build query
+        // Build query with limits
+        const DEFAULT_LIMIT: i64 = 100;
+        const MAX_LIMIT: i64 = 1000;
+
+        let limit = match request.limit {
+            Some(l) => Some(l.clamp(1, MAX_LIMIT)),
+            None => Some(DEFAULT_LIMIT),
+        };
+
         let query = S3ObjectQuery {
             bucket: request.bucket,
             prefix: request.prefix,
             tags: Some(request.tags),
-            limit: request.limit,
+            limit,
             include_deleted: request.include_deleted.unwrap_or(false),
             ..Default::default()
         };
@@ -234,7 +253,9 @@ fn parse_query_params(query_str: &str) -> Result<S3ObjectQuery, String> {
                 query.include_deleted = value.parse::<bool>().map_err(|e| format!("Invalid include_deleted: {}", e))?;
             }
             "limit" => {
-                query.limit = Some(value.parse::<i64>().map_err(|e| format!("Invalid limit: {}", e))?);
+                let limit_val = value.parse::<i64>().map_err(|e| format!("Invalid limit: {}", e))?;
+                // Enforce maximum limit of 1000 to prevent excessive queries
+                query.limit = Some(limit_val.clamp(1, 1000));
             }
             "offset" => {
                 query.offset = Some(value.parse::<i64>().map_err(|e| format!("Invalid offset: {}", e))?);
