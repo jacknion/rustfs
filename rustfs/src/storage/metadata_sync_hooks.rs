@@ -53,8 +53,8 @@ pub fn sync_put_object_metadata(obj_info: &ObjectInfo, owner_id: Option<String>)
             bucket = %obj_info.bucket,
             object_key = %obj_info.name,
             size = obj_info.size,
-            error_type = if e.contains("Channel full") { "channel_full" } else { "channel_closed" },
-            "Failed to send metadata sync event for put object - metadata will not be searchable via query API"
+            error_type = if e.contains("Channel full") { "channel_full" } else if e.contains("not initialized") { "NOT_INITIALIZED" } else { "channel_closed" },
+            "❌ SYNC FAILED: Failed to send metadata sync event for put object"
         );
     }
 }

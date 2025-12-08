@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS rustfs.s3_objects (
         CHECK (storage_class IN ('STANDARD', 'REDUCED_REDUNDANCY', 'GLACIER', 'GLACIER_IR', 'DEEP_ARCHIVE', 'INTELLIGENT_TIERING', 'ONEZONE_IA', 'STANDARD_IA')),
     version_id TEXT,  -- 版本控制支持
     is_delete_marker BOOLEAN DEFAULT false,
+    is_deleted BOOLEAN DEFAULT false,  -- 软删除标记
     is_latest BOOLEAN DEFAULT true,  -- 是否为最新版本
     
     -- ==================== 核心：标签存储（JSONB 格式）====================

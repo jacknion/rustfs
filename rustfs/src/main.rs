@@ -262,16 +262,14 @@ async fn run(opt: config::Opt) -> Result<()> {
 
     // Initialize database connection pool if database URL is configured
     if let Some(database_url) = &opt.database_url {
-        info!(
-            target: "rustfs::main::run",
-            "Database URL configured, initializing connection pool..."
-        );
+        
         let db_config = DatabaseConfig {
             url: database_url.clone(),
             max_connections: opt.database_max_connections,
             connect_timeout: std::time::Duration::from_secs(30),
             idle_timeout: std::time::Duration::from_secs(600),
         };
+        
         init_database_pool(db_config).await.map_err(|e| {
             error!(
                 target: "rustfs::main::run",

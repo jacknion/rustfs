@@ -88,8 +88,12 @@ impl S3ObjectRepository {
     ///
     /// Returns the ID of the inserted/updated record
     pub async fn upsert(pool: &PgPool, obj: &CreateS3Object) -> Result<i64, sqlx::Error> {
-        let tags_json = obj.tags.as_ref().and_then(|t| serde_json::to_value(t).ok());
-        let user_metadata_json = obj.user_metadata.as_ref().and_then(|m| serde_json::to_value(m).ok());
+        let tags_json = obj.tags.as_ref()
+            .and_then(|t| serde_json::to_value(t).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let user_metadata_json = obj.user_metadata.as_ref()
+            .and_then(|m| serde_json::to_value(m).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
 
         let result = sqlx::query_scalar::<_, i64>(
             r#"

@@ -8,6 +8,8 @@
 .devcontainer
 rustfs/static/*
 !rustfs/static/.gitkeep
+!rustfs/static/metadata-query
+!rustfs/static/metadata-query/*
 vendor
 cli/rustfs-gui/embedded-rustfs/rustfs
 *.log

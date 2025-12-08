@@ -69,14 +69,35 @@ pub(crate) async fn static_handler(uri: Uri) -> impl IntoResponse {
     if path.is_empty() {
         path = "index.html"
     }
+    
+    // Try to get the file directly
     if let Some(file) = StaticFiles::get(path) {
         let mime_type = from_path(path).first_or_octet_stream();
-        Response::builder()
+        return Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", mime_type.to_string())
             .body(Body::from(file.data))
-            .unwrap()
-    } else if let Some(file) = StaticFiles::get("index.html") {
+            .unwrap();
+    }
+    
+    // If path ends with '/' or is a directory, try to get index.html in that directory
+    let index_path = if path.ends_with('/') {
+        format!("{}index.html", path)
+    } else {
+        format!("{}/index.html", path)
+    };
+    
+    if let Some(file) = StaticFiles::get(&index_path) {
+        let mime_type = from_path("index.html").first_or_octet_stream();
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", mime_type.to_string())
+            .body(Body::from(file.data))
+            .unwrap();
+    }
+    
+    // Fallback to root index.html for SPA routing
+    if let Some(file) = StaticFiles::get("index.html") {
         let mime_type = from_path("index.html").first_or_octet_stream();
         Response::builder()
             .status(StatusCode::OK)
