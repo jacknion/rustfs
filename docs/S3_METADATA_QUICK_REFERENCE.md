@@ -20,32 +20,141 @@
 
 ## 🚀 快速开始（3 分钟）
 
+### 步骤 1：准备 PostgreSQL 数据库
+
 ```bash
-# 1. 配置数据库连接（支持自动建表）
-export RUSTFS_DATABASE_URL="postgres://rustfs_user:password@localhost:5432/rustfs_db"
+# 创建数据库和用户
+psql -U postgres <<EOF
+CREATE DATABASE rustfs_db;
+CREATE USER rustfs_user WITH PASSWORD 'your_secure_password';
+GRANT ALL PRIVILEGES ON DATABASE rustfs_db TO rustfs_user;
+\c rustfs_db
+GRANT ALL ON SCHEMA public TO rustfs_user;
+ALTER DATABASE rustfs_db OWNER TO rustfs_user;
+EOF
+```
+
+**说明**：
+- `rustfs_db` = **数据库名称**（Database），PostgreSQL 的顶层容器
+- `rustfs` = **Schema 名称**（命名空间），数据库内的逻辑分组，由 RustFS 自动创建
+- 完整路径：`rustfs_db.rustfs.s3_objects`（数据库.schema.表）
+- 这两个名称在不同层级，**不冲突**
+
+### 步骤 2：配置环境变量
+
+```bash
+# 必需：数据库连接字符串
+export RUSTFS_DATABASE_URL="postgres://rustfs_user:your_secure_password@localhost:5432/rustfs_db"
+
+# 可选：连接池大小（默认 20）
 export RUSTFS_DATABASE_MAX_CONNECTIONS=20
 
-# 2. 启动 RustFS（首次启动会自动创建 rustfs schema 和所有表）
-./rustfs server --config config.yaml
+# 可选：其他 RustFS 配置
+export RUSTFS_VOLUMES="./data"
+export RUSTFS_ADDRESS=":9000"
+export RUSTFS_CONSOLE_ENABLE=true
+export RUSTFS_CONSOLE_ADDRESS=":9001"
+```
+
+### 步骤 3：启动 RustFS
+
+```bash
+# 启动 RustFS（首次启动会自动创建 rustfs schema 和所有表）
+./rustfs
 
 # 或者使用 cargo 运行
-cargo run --bin rustfs -- --volumes /data
+cargo run --bin rustfs
+```
+
+**首次启动日志示例**：
+```
+INFO rustfs::storage::database: Initializing database connection pool
+INFO rustfs::storage::database: Database connection pool initialized successfully
+WARN rustfs::storage::database: Table rustfs.s3_objects not found, creating database schema...
+INFO rustfs::storage::database: Database schema created successfully in rustfs schema
+INFO rustfs::main::run: Metadata sync service initialized successfully
 ```
 
 **注意**：
 - ✅ 无需手动执行 SQL 脚本，RustFS 会自动检测并创建数据库表
 - ✅ 所有表都在独立的 `rustfs` schema 中，避免命名冲突
 - ✅ 首次启动会看到日志：`Database schema created successfully in rustfs schema`
+- ⚠️ 确保 PostgreSQL 版本 ≥ 16
 
 ### 手动初始化（可选）
 
-如果需要手动控制，可以提前执行：
+如果需要手动控制数据库表创建，可以提前执行：
 
 ```bash
+# 方式 1：直接使用 psql 执行 SQL 文件
 psql -U rustfs_user -d rustfs_db -f scripts/s3_metadata_schema.sql
+
+# 方式 2：使用命令行一次性执行
+psql "postgres://rustfs_user:your_secure_password@localhost:5432/rustfs_db" \
+  -f scripts/s3_metadata_schema.sql
+```
+
+### 验证数据库配置
+
+```bash
+# 测试数据库连接
+psql "postgres://rustfs_user:your_secure_password@localhost:5432/rustfs_db" -c "SELECT version();"
+
+# 检查 rustfs schema 是否存在
+psql "postgres://rustfs_user:your_secure_password@localhost:5432/rustfs_db" \
+  -c "SELECT schema_name FROM information_schema.schemata WHERE schema_name = 'rustfs';"
+
+# 检查表是否创建成功
+psql "postgres://rustfs_user:your_secure_password@localhost:5432/rustfs_db" \
+  -c "\dt rustfs.*"
+```
+
+### 完整启动示例（包含数据库）
+
+```bash
+#!/bin/bash
+
+# 数据库配置
+export RUSTFS_DATABASE_URL="postgres://rustfs_user:your_secure_password@localhost:5432/rustfs_db"
+export RUSTFS_DATABASE_MAX_CONNECTIONS=20
+
+# RustFS 基础配置
+export RUSTFS_VOLUMES="./data"
+export RUSTFS_ADDRESS=":9000"
+export RUSTFS_CONSOLE_ENABLE=true
+export RUSTFS_CONSOLE_ADDRESS=":9001"
+
+# 日志配置
+export RUSTFS_OBS_LOGGER_LEVEL=info
+export RUSTFS_OBS_LOG_DIRECTORY="./logs"
+
+# 启动 RustFS
+./rustfs
 ```
 
 ## ⚠️ 重要提示
+
+### PostgreSQL 层次结构说明
+
+```
+PostgreSQL Server
+  └── Database: rustfs_db          ← 连接字符串中的数据库名
+      ├── Schema: public            ← PostgreSQL 默认 schema
+      └── Schema: rustfs            ← RustFS 专用 schema（自动创建）
+          ├── Table: s3_objects
+          ├── Table: bucket_stats
+          └── Table: tag_statistics
+```
+
+**关键概念**：
+- **Database（数据库）**：`rustfs_db` - 顶层容器，在连接字符串中指定
+- **Schema（命名空间）**：`rustfs` - 数据库内的逻辑分组，避免表名冲突
+- **Table（表）**：`s3_objects` 等 - 实际存储数据的表
+
+**为什么使用独立 schema？**
+- ✅ 避免与其他应用的表名冲突（如 `public.users` vs `rustfs.s3_objects`）
+- ✅ 更清晰的权限管理
+- ✅ 便于备份和迁移特定应用的数据
 
 ### Schema 命名空间
 
