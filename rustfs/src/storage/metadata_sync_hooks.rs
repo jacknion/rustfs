@@ -91,6 +91,49 @@ pub fn sync_delete_object_metadata(bucket: &str, object_key: &str) {
     }
 }
 
+/// Sync object tags to database after successful PutObjectTagging
+///
+/// This is a non-blocking operation that queues the tag update for async processing.
+///
+/// # Arguments
+///
+/// * `bucket` - Bucket name
+/// * `object_key` - Object key
+/// * `tags` - Tag key-value pairs
+pub fn sync_object_tags(bucket: &str, object_key: &str, tags: std::collections::HashMap<String, String>) {
+    use crate::storage::database::{UpdateS3Object, MetadataSyncEvent, send_sync_event};
+    
+    debug!(
+        target: "rustfs::storage::metadata_sync_hooks",
+        bucket = %bucket,
+        object_key = %object_key,
+        tags_count = tags.len(),
+        "Syncing object tags to database"
+    );
+
+    // Create update event with tags
+    let update = UpdateS3Object {
+        tags: Some(tags),
+        ..Default::default()
+    };
+
+    // Send update event to sync service (non-blocking)
+    if let Err(e) = send_sync_event(MetadataSyncEvent::Update {
+        bucket: bucket.to_string(),
+        object_key: object_key.to_string(),
+        update: Box::new(update),
+    }) {
+        warn!(
+            target: "rustfs::storage::metadata_sync_hooks",
+            error = %e,
+            bucket = %bucket,
+            object_key = %object_key,
+            error_type = if e.contains("Channel full") { "channel_full" } else { "channel_closed" },
+            "Failed to send tag sync event - database tags may be out of sync"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

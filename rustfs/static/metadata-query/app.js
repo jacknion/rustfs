@@ -37,6 +37,7 @@ const app = createApp({
         // Tags management
         const tags = ref([]);
         const newTag = reactive({ key: '', value: '' });
+        const useFuzzySearch = ref(false); // 添加模糊搜索开关
 
         // Computed
         const totalPages = computed(() => {
@@ -94,13 +95,15 @@ const app = createApp({
             params.append('limit', String(query.limit));
             params.append('offset', String(offset));
             
-            // Add tags as JSON
+            // Add tags as JSON (精确或模糊搜索)
             if (tags.value.length > 0) {
                 const tagsObj = {};
                 tags.value.forEach(t => {
                     tagsObj[t.key] = t.value;
                 });
-                params.append('tags', JSON.stringify(tagsObj));
+                // 根据模糊搜索开关使用不同的参数
+                const tagParam = useFuzzySearch.value ? 'tags_fuzzy' : 'tags';
+                params.append(tagParam, JSON.stringify(tagsObj));
             }
             
             return `${getApiBase()}/rustfs/admin/v3/s3/metadata/query?${params.toString()}`;
@@ -297,6 +300,7 @@ const app = createApp({
             query,
             tags,
             newTag,
+            useFuzzySearch,
             totalPages,
             
             // Methods

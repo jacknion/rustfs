@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS rustfs.s3_objects (
     
     -- ==================== 安全与合规 ====================
     is_encrypted BOOLEAN DEFAULT false,
-    encryption_algorithm VARCHAR(50),  -- 如：AES256, aws:kms
+    encryption TEXT,  -- 加密算法，如：AES256, aws:kms
     kms_key_id TEXT,  -- KMS Key ID
     
     -- 对象锁定（Object Lock）
@@ -250,10 +250,10 @@ SELECT
     bucket,
     COUNT(*) AS encrypted_count,
     SUM(size_bytes) AS total_encrypted_bytes,
-    encryption_algorithm
+    encryption
 FROM rustfs.s3_objects
 WHERE is_encrypted = true
-GROUP BY bucket, encryption_algorithm;
+GROUP BY bucket, encryption;
 
 -- =====================================================
 -- 示例数据（测试用）
@@ -347,7 +347,7 @@ ON CONFLICT (bucket) DO UPDATE SET
 -- ORDER BY size_bytes DESC;
 
 -- 示例 7：查找加密对象
--- SELECT bucket, object_key, encryption_algorithm
+-- SELECT bucket, object_key, encryption
 -- FROM rustfs.s3_objects
 -- WHERE is_encrypted = true;
 

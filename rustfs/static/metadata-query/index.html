@@ -91,7 +91,17 @@
 
                 <!-- Row 2: Tags -->
                 <div class="mb-4">
-                    <label class="block text-sm font-medium text-gray-700 mb-1">标签过滤</label>
+                    <div class="flex items-center justify-between mb-1">
+                        <label class="block text-sm font-medium text-gray-700">标签过滤</label>
+                        <label class="flex items-center text-xs text-gray-600">
+                            <input 
+                                v-model="useFuzzySearch" 
+                                type="checkbox"
+                                class="mr-1 rounded border-gray-300 text-orange-500 focus:ring-orange-500"
+                            >
+                            模糊搜索 (支持部分匹配，不区分大小写)
+                        </label>
+                    </div>
                     <div class="flex flex-wrap gap-2 mb-2">
                         <div v-for="(tag, index) in tags" :key="index" 
                              class="flex items-center bg-orange-100 text-orange-800 px-3 py-1 rounded-full text-sm">
@@ -107,17 +117,17 @@
                         <input 
                             v-model="newTag.key" 
                             type="text" 
-                            placeholder="标签键"
+                            :placeholder="useFuzzySearch ? '标签键 (支持部分匹配)' : '标签键'"
                             @keyup.enter="addTag"
-                            class="w-32 px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-orange-500 focus:border-orange-500 text-sm"
+                            class="w-40 px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-orange-500 focus:border-orange-500 text-sm"
                         >
                         <span class="py-2 text-gray-500">=</span>
                         <input 
                             v-model="newTag.value" 
                             type="text" 
-                            placeholder="标签值"
+                            :placeholder="useFuzzySearch ? '标签值 (支持部分匹配)' : '标签值'"
                             @keyup.enter="addTag"
-                            class="w-32 px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-orange-500 focus:border-orange-500 text-sm"
+                            class="w-40 px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-orange-500 focus:border-orange-500 text-sm"
                         >
                         <button 
                             @click="addTag"
@@ -126,6 +136,9 @@
                             + 添加
                         </button>
                     </div>
+                    <p v-if="useFuzzySearch && tags.length > 0" class="mt-2 text-xs text-gray-500">
+                        💡 模糊搜索示例：输入 "env" 可匹配 "environment"、"ENV"、"dev-env" 等标签
+                    </p>
                 </div>
 
                 <!-- Row 3: Size & Date Range -->

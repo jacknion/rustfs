@@ -139,7 +139,8 @@ pub struct QueryS3MetadataByTagsHandler;
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct QueryByTagsRequest {
-    tags: HashMap<String, String>,
+    tags: Option<HashMap<String, String>>,
+    tags_fuzzy: Option<HashMap<String, String>>,
     limit: Option<i64>,
     bucket: Option<String>,
     prefix: Option<String>,
@@ -171,6 +172,7 @@ impl Operation for QueryS3MetadataByTagsHandler {
         debug!(
             target: "rustfs::admin::handlers::s3_metadata",
             tags = ?request.tags,
+            tags_fuzzy = ?request.tags_fuzzy,
             limit = ?request.limit,
             bucket = ?request.bucket,
             "Parsed query by tags request"
@@ -188,7 +190,8 @@ impl Operation for QueryS3MetadataByTagsHandler {
         let query = S3ObjectQuery {
             bucket: request.bucket,
             prefix: request.prefix,
-            tags: Some(request.tags),
+            tags: request.tags,
+            tags_fuzzy: request.tags_fuzzy,
             limit,
             include_deleted: request.include_deleted.unwrap_or(false),
             ..Default::default()
@@ -293,6 +296,12 @@ fn parse_query_params(query_str: &str) -> Result<S3ObjectQuery, String> {
                 let tags: HashMap<String, String> =
                     serde_json::from_str(&value).map_err(|e| format!("Invalid tags JSON: {}", e))?;
                 query.tags = Some(tags);
+            }
+            "tags_fuzzy" => {
+                // Parse tags_fuzzy as JSON: tags_fuzzy={"key1":"value1","key2":"value2"}
+                let tags_fuzzy: HashMap<String, String> =
+                    serde_json::from_str(&value).map_err(|e| format!("Invalid tags_fuzzy JSON: {}", e))?;
+                query.tags_fuzzy = Some(tags_fuzzy);
             }
             _ => {
                 // Ignore unknown parameters

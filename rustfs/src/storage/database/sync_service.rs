@@ -16,7 +16,7 @@
 //!
 //! This service provides non-blocking metadata sync from S3 operations to the database.
 
-use crate::storage::database::{CreateS3Object, get_database_pool, repositories::S3ObjectRepository};
+use crate::storage::database::{CreateS3Object, UpdateS3Object, get_database_pool, repositories::S3ObjectRepository};
 use once_cell::sync::OnceCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -49,6 +49,13 @@ pub struct SyncServiceStats {
 pub enum MetadataSyncEvent {
     /// Object was created or updated
     Upsert(Box<CreateS3Object>),
+
+    /// Object metadata was updated (partial update)
+    Update {
+        bucket: String,
+        object_key: String,
+        update: Box<UpdateS3Object>,
+    },
 
     /// Object was deleted
     Delete { bucket: String, object_key: String },
@@ -240,6 +247,7 @@ impl SyncServiceSnapshot {
 /// Background worker that processes sync events
 async fn sync_worker(mut rx: mpsc::Receiver<MetadataSyncEvent>, config: MetadataSyncConfig, stats: Arc<SyncServiceStats>) {
     let mut batch_upserts: Vec<CreateS3Object> = Vec::with_capacity(config.batch_size);
+    let mut batch_updates: Vec<(String, String, UpdateS3Object)> = Vec::with_capacity(config.batch_size); // (bucket, key, update)
     let mut batch_deletes: Vec<(String, String)> = Vec::with_capacity(config.batch_size);
 
     let mut flush_interval = tokio::time::interval(tokio::time::Duration::from_secs(config.flush_interval_secs));
@@ -253,6 +261,9 @@ async fn sync_worker(mut rx: mpsc::Receiver<MetadataSyncEvent>, config: Metadata
                     MetadataSyncEvent::Upsert(obj) => {
                         batch_upserts.push(*obj);
                     }
+                    MetadataSyncEvent::Update { bucket, object_key, update } => {
+                        batch_updates.push((bucket, object_key, *update));
+                    }
                     MetadataSyncEvent::Delete { bucket, object_key } => {
                         batch_deletes.push((bucket, object_key));
                     }
@@ -263,21 +274,21 @@ async fn sync_worker(mut rx: mpsc::Receiver<MetadataSyncEvent>, config: Metadata
                         );
 
                         // Flush remaining events
-                        flush_batch(&mut batch_upserts, &mut batch_deletes, &config, &stats).await;
+                        flush_batch(&mut batch_upserts, &mut batch_updates, &mut batch_deletes, &config, &stats).await;
                         break;
                     }
                 }
 
                 // Flush if batch size reached
-                if batch_upserts.len() >= config.batch_size || batch_deletes.len() >= config.batch_size {
-                    flush_batch(&mut batch_upserts, &mut batch_deletes, &config, &stats).await;
+                if batch_upserts.len() >= config.batch_size || batch_updates.len() >= config.batch_size || batch_deletes.len() >= config.batch_size {
+                    flush_batch(&mut batch_upserts, &mut batch_updates, &mut batch_deletes, &config, &stats).await;
                 }
             }
 
             // Periodic flush based on time interval
             _ = flush_interval.tick() => {
-                if !batch_upserts.is_empty() || !batch_deletes.is_empty() {
-                    flush_batch(&mut batch_upserts, &mut batch_deletes, &config, &stats).await;
+                if !batch_upserts.is_empty() || !batch_updates.is_empty() || !batch_deletes.is_empty() {
+                    flush_batch(&mut batch_upserts, &mut batch_updates, &mut batch_deletes, &config, &stats).await;
                 }
             }
         }
@@ -292,11 +303,12 @@ async fn sync_worker(mut rx: mpsc::Receiver<MetadataSyncEvent>, config: Metadata
 /// Flush accumulated batches to database with retry mechanism
 async fn flush_batch(
     upserts: &mut Vec<CreateS3Object>,
+    updates: &mut Vec<(String, String, UpdateS3Object)>,
     deletes: &mut Vec<(String, String)>,
     config: &MetadataSyncConfig,
     stats: &Arc<SyncServiceStats>,
 ) {
-    if upserts.is_empty() && deletes.is_empty() {
+    if upserts.is_empty() && updates.is_empty() && deletes.is_empty() {
         return;
     }
 
@@ -309,6 +321,7 @@ async fn flush_batch(
             );
             // Clear batches to avoid accumulating in memory
             upserts.clear();
+            updates.clear();
             deletes.clear();
             return;
         }
@@ -349,6 +362,47 @@ async fn flush_batch(
             success = success_count,
             failed = failure_count,
             "Flushed upsert batch"
+        );
+    }
+
+    // Process updates with retry
+    if !updates.is_empty() {
+        let update_count = updates.len();
+        let mut success_count = 0;
+        let mut failure_count = 0;
+
+        for (bucket, object_key, update_obj) in updates.drain(..) {
+            match retry_database_operation(
+                || S3ObjectRepository::update(pool, &bucket, &object_key, &update_obj),
+                config.max_retries,
+                config.retry_delay_ms
+            ).await
+            {
+                Ok(_) => {
+                    success_count += 1;
+                    stats.upsert_success.fetch_add(1, Ordering::Relaxed); // Reuse upsert stats for updates
+                }
+                Err(e) => {
+                    failure_count += 1;
+                    stats.upsert_failed.fetch_add(1, Ordering::Relaxed);
+                    error!(
+                        target: "rustfs::storage::database::sync_service",
+                        bucket = %bucket,
+                        object_key = %object_key,
+                        error = %e,
+                        retries = config.max_retries,
+                        "Failed to update S3 object metadata after retries"
+                    );
+                }
+            }
+        }
+
+        debug!(
+            target: "rustfs::storage::database::sync_service",
+            total = update_count,
+            success = success_count,
+            failed = failure_count,
+            "Flushed update batch"
         );
     }
 

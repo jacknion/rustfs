@@ -360,12 +360,29 @@ impl S3ObjectRepository {
             qb.push(" AND is_deleted = false");
         }
 
-        // Apply tag filters if specified
+        // Apply tag filters if specified (exact match)
         if let Some(ref tags) = query.tags {
             if !tags.is_empty() {
                 let tags_json = serde_json::to_value(tags).unwrap_or_default();
                 qb.push(" AND tags @> ");
                 qb.push_bind(tags_json);
+            }
+        }
+
+        // Apply fuzzy tag filters if specified (partial match, case-insensitive)
+        if let Some(ref tags_fuzzy) = query.tags_fuzzy {
+            if !tags_fuzzy.is_empty() {
+                for (key, value) in tags_fuzzy {
+                    // Use jsonb_path_exists for flexible JSON querying
+                    // Search for tag key that contains the search pattern (case-insensitive)
+                    qb.push(" AND EXISTS (");
+                    qb.push("   SELECT 1 FROM jsonb_each_text(tags) AS t(k, v)");
+                    qb.push("   WHERE LOWER(t.k) ILIKE ");
+                    qb.push_bind(format!("%{}%", key.to_lowercase()));
+                    qb.push("   AND LOWER(t.v) ILIKE ");
+                    qb.push_bind(format!("%{}%", value.to_lowercase()));
+                    qb.push(" )");
+                }
             }
         }
 

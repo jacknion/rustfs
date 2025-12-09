@@ -3619,7 +3619,7 @@ impl S3 for FS {
             }
         }
 
-        let tags = encode_tags(tagging.tag_set);
+        let tags = encode_tags(tagging.tag_set.clone());
 
         // TODO: getOpts
         // TODO: Replicate
@@ -3628,6 +3628,18 @@ impl S3 for FS {
             .put_object_tags(&bucket, &object, &tags, &ObjectOptions::default())
             .await
             .map_err(ApiError::from)?;
+
+        // Sync tags to database (non-blocking)
+        let tags_map: std::collections::HashMap<String, String> = tagging.tag_set
+            .iter()
+            .filter_map(|tag| {
+                tag.key.as_ref().and_then(|k| {
+                    tag.value.as_ref().map(|v| (k.clone(), v.clone()))
+                })
+            })
+            .collect();
+        
+        crate::storage::metadata_sync_hooks::sync_object_tags(&bucket, &object, tags_map);
 
         let version_id = req.input.version_id.clone().unwrap_or_default();
         helper = helper.version_id(version_id);
@@ -3677,6 +3689,9 @@ impl S3 for FS {
             .delete_object_tags(&bucket, &object, &ObjectOptions::default())
             .await
             .map_err(ApiError::from)?;
+
+        // Sync empty tags to database (non-blocking)
+        crate::storage::metadata_sync_hooks::sync_object_tags(&bucket, &object, std::collections::HashMap::new());
 
         let version_id = req.input.version_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
         helper = helper.version_id(version_id);

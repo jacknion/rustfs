@@ -156,6 +156,10 @@ pub struct S3ObjectQuery {
     /// Filter by tags (exact match)
     pub tags: Option<HashMap<String, String>>,
 
+    /// Filter by tags using fuzzy search (partial match, case-insensitive)
+    /// Key-value pairs where values support wildcards (%, _)
+    pub tags_fuzzy: Option<HashMap<String, String>>,
+
     /// Minimum object size (bytes)
     pub min_size: Option<i64>,
 
