@@ -6,18 +6,36 @@ RustFS 提供完整的 S3 兼容标签管理 API，支持对象标签的增删�
 
 ## 目录
 
-- [对象标签操作](#对象标签操作)
-  - [PUT Object Tagging](#put-object-tagging)
-  - [GET Object Tagging](#get-object-tagging)
-  - [DELETE Object Tagging](#delete-object-tagging)
-  - [PUT Object (带标签)](#put-object-带标签)
-- [标签查询 API](#标签查询-api)
-  - [精确匹配查询](#精确匹配查询)
-  - [模糊搜索查询](#模糊搜索查询)
-  - [分页查询](#分页查询)
-- [标签限制](#标签限制)
-- [最佳实践](#最佳实践)
-- [示例代码](#示例代码)
+- [RustFS 标签 API 参考文档](#rustfs-标签-api-参考文档)
+  - [概述](#概述)
+  - [目录](#目录)
+  - [对象标签操作](#对象标签操作)
+    - [PUT Object Tagging](#put-object-tagging)
+    - [GET Object Tagging](#get-object-tagging)
+    - [DELETE Object Tagging](#delete-object-tagging)
+    - [PUT Object (带标签)](#put-object-带标签)
+  - [标签查询 API](#标签查询-api)
+    - [精确匹配查询](#精确匹配查询)
+    - [模糊搜索查询](#模糊搜索查询)
+    - [分页查询](#分页查询)
+  - [标签限制](#标签限制)
+  - [最佳实践](#最佳实践)
+    - [1. 标签命名规范](#1-标签命名规范)
+    - [2. 标签策略设计](#2-标签策略设计)
+    - [3. 查询优化](#3-查询优化)
+    - [4. 批量标签操作](#4-批量标签操作)
+  - [示例代码](#示例代码)
+    - [完整的 Python 标签管理类](#完整的-python-标签管理类)
+    - [Shell 脚本示例](#shell-脚本示例)
+  - [错误处理](#错误处理)
+    - [常见错误代码](#常见错误代码)
+    - [Python 错误处理示例](#python-错误处理示例)
+  - [监控和日志](#监控和日志)
+    - [查看标签同步日志](#查看标签同步日志)
+    - [同步统计 API](#同步统计-api)
+  - [性能建议](#性能建议)
+  - [相关文档](#相关文档)
+  - [支持](#支持)
 
 ---
 
@@ -25,7 +43,12 @@ RustFS 提供完整的 S3 兼容标签管理 API，支持对象标签的增删�
 
 ### PUT Object Tagging
 
-为已存在的对象添加或更新标签。
+为已存在的对象设置标签（**完全替换模式**）。
+
+**⚠️ 重要说明**
+- `PUT Object Tagging` 会 **完全替换** 对象的所有标签
+- 不支持修改单个标签，必须提供完整的标签集合
+- 如果只想修改某个标签，需要先 GET 获取所有标签，修改后再 PUT 回去
 
 **端点**
 ```
@@ -36,7 +59,7 @@ PUT /{bucket}/{object}?tagging
 ```
 Content-Type: application/xml
 Content-MD5: <md5-hash>  (可选)
-x-amz-tagging-directive: REPLACE  (默认)
+x-amz-tagging-directive: REPLACE  (强制替换所有标签)
 ```
 
 **请求体**
@@ -109,9 +132,50 @@ s3.put_object_tagging(
 
 **特性**
 - ✅ 自动同步到数据库（如果配置了 PostgreSQL）
-- ✅ 支持批量更新（覆盖所有已有标签）
+- ⚠️ **完全替换模式**：会覆盖对象的所有现有标签
 - ✅ 异步处理，不阻塞响应
 - ✅ 自动重试机制
+
+**修改单个标签的方法**
+```python
+# 方法1：先获取再修改（推荐）
+def update_single_tag(s3, bucket, key, tag_key, new_value):
+    """更新单个标签，保留其他标签"""
+    # 1. 获取当前所有标签
+    response = s3.get_object_tagging(Bucket=bucket, Key=key)
+    tags = {tag['Key']: tag['Value'] for tag in response['TagSet']}
+    
+    # 2. 修改指定标签
+    tags[tag_key] = new_value
+    
+    # 3. 写回所有标签
+    tag_set = [{'Key': k, 'Value': v} for k, v in tags.items()]
+    s3.put_object_tagging(
+        Bucket=bucket,
+        Key=key,
+        Tagging={'TagSet': tag_set}
+    )
+
+# 使用示例
+update_single_tag(s3, 'my-bucket', 'file.txt', 'Environment', 'Staging')
+
+# 方法2：添加新标签，保留已有标签
+def add_tags(s3, bucket, key, new_tags):
+    """添加新标签，不影响现有标签"""
+    # 获取现有标签
+    response = s3.get_object_tagging(Bucket=bucket, Key=key)
+    existing_tags = {tag['Key']: tag['Value'] for tag in response['TagSet']}
+    
+    # 合并标签（新标签会覆盖同名的旧标签）
+    existing_tags.update(new_tags)
+    
+    # 写回
+    tag_set = [{'Key': k, 'Value': v} for k, v in existing_tags.items()]
+    s3.put_object_tagging(Bucket=bucket, Key=key, Tagging={'TagSet': tag_set})
+
+# 使用示例
+add_tags(s3, 'my-bucket', 'file.txt', {'NewTag': 'NewValue', 'UpdatedTag': 'UpdatedValue'})
+```
 
 ---
 
