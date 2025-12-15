@@ -16,7 +16,6 @@
 use std::hash::{Hash, Hasher};
 use std::io::{self};
 use std::path::PathBuf;
-use tracing::error;
 
 pub type Error = DiskError;
 pub type Result<T> = core::result::Result<T, Error>;
@@ -140,6 +139,12 @@ pub enum DiskError {
 
     #[error("io error {0}")]
     Io(io::Error),
+
+    #[error("source stalled")]
+    SourceStalled,
+
+    #[error("timeout")]
+    Timeout,
 }
 
 impl DiskError {
@@ -366,6 +371,8 @@ impl Clone for DiskError {
             DiskError::ErasureWriteQuorum => DiskError::ErasureWriteQuorum,
             DiskError::ErasureReadQuorum => DiskError::ErasureReadQuorum,
             DiskError::ShortWrite => DiskError::ShortWrite,
+            DiskError::SourceStalled => DiskError::SourceStalled,
+            DiskError::Timeout => DiskError::Timeout,
         }
     }
 }
@@ -412,6 +419,8 @@ impl DiskError {
             DiskError::ErasureWriteQuorum => 0x25,
             DiskError::ErasureReadQuorum => 0x26,
             DiskError::ShortWrite => 0x27,
+            DiskError::SourceStalled => 0x28,
+            DiskError::Timeout => 0x29,
         }
     }
 
@@ -456,6 +465,8 @@ impl DiskError {
             0x25 => Some(DiskError::ErasureWriteQuorum),
             0x26 => Some(DiskError::ErasureReadQuorum),
             0x27 => Some(DiskError::ShortWrite),
+            0x28 => Some(DiskError::SourceStalled),
+            0x29 => Some(DiskError::Timeout),
             _ => None,
         }
     }

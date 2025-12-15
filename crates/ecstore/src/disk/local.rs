@@ -806,7 +806,7 @@ impl LocalDisk {
         Ok((bytes, modtime))
     }
 
-    async fn delete_versions_internal(&self, volume: &str, path: &str, fis: &Vec<FileInfo>) -> Result<()> {
+    async fn delete_versions_internal(&self, volume: &str, path: &str, fis: &[FileInfo]) -> Result<()> {
         let volume_dir = self.get_bucket_path(volume)?;
         let xlpath = self.get_object_path(volume, format!("{path}/{STORAGE_FORMAT_FILE}").as_str())?;
 
@@ -820,7 +820,7 @@ impl LocalDisk {
 
         fm.unmarshal_msg(&data)?;
 
-        for fi in fis {
+        for fi in fis.iter() {
             let data_dir = match fm.delete_version(fi) {
                 Ok(res) => res,
                 Err(err) => {
@@ -967,9 +967,7 @@ impl LocalDisk {
         sum: &[u8],
         shard_size: usize,
     ) -> Result<()> {
-        let file = super::fs::open_file(part_path, O_CREATE | O_WRONLY)
-            .await
-            .map_err(to_file_error)?;
+        let file = super::fs::open_file(part_path, O_RDONLY).await.map_err(to_file_error)?;
 
         let meta = file.metadata().await.map_err(to_file_error)?;
         let file_size = meta.len() as usize;
@@ -1465,6 +1463,7 @@ impl DiskAPI for LocalDisk {
             resp.results[i] = conv_part_err_to_int(&err);
             if resp.results[i] == CHECK_PART_UNKNOWN {
                 if let Some(err) = err {
+                    error!("verify_file: failed to bitrot verify file: {:?}, error: {:?}", &part_path, &err);
                     if err == DiskError::FileAccessDenied {
                         continue;
                     }
@@ -1551,7 +1550,7 @@ impl DiskAPI for LocalDisk {
                 .join(fi.data_dir.map_or("".to_string(), |dir| dir.to_string()))
                 .join(format!("part.{}", part.number));
 
-            match lstat(file_path).await {
+            match lstat(&file_path).await {
                 Ok(st) => {
                     if st.is_dir() {
                         resp.results[i] = CHECK_PART_FILE_NOT_FOUND;
@@ -1577,6 +1576,8 @@ impl DiskAPI for LocalDisk {
                             }
                         }
                         resp.results[i] = CHECK_PART_FILE_NOT_FOUND;
+                    } else {
+                        error!("check_parts: failed to stat file: {:?}, error: {:?}", &file_path, &e);
                     }
                     continue;
                 }
@@ -1984,34 +1985,19 @@ impl DiskAPI for LocalDisk {
 
         // TODO: Healing
 
-        let has_old_data_dir = {
-            if let Ok((_, ver)) = xlmeta.find_version(fi.version_id) {
-                let has_data_dir = ver.get_data_dir();
-                if let Some(data_dir) = has_data_dir {
-                    if xlmeta.shard_data_dir_count(&fi.version_id, &Some(data_dir)) == 0 {
-                        // TODO: Healing
-                        // remove inlinedata\
-                        Some(data_dir)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        };
+        let search_version_id = fi.version_id.or(Some(Uuid::nil()));
 
-        // CLAUDE DEBUG: Check if inline data is being preserved
-        tracing::info!(
-            "CLAUDE DEBUG: rename_data - Adding version to xlmeta. fi.data.is_some()={}, fi.inline_data()={}, fi.size={}",
-            fi.data.is_some(),
-            fi.inline_data(),
-            fi.size
-        );
-        if let Some(ref data) = fi.data {
-            tracing::info!("CLAUDE DEBUG: rename_data - FileInfo has inline data: {} bytes", data.len());
+        // Check if there's an existing version with the same version_id that has a data_dir to clean up
+        // Note: For non-versioned buckets, fi.version_id is None, but in xl.meta it's stored as Some(Uuid::nil())
+        let has_old_data_dir = {
+            xlmeta.find_version(search_version_id).ok().and_then(|(_, ver)| {
+                // shard_count == 0 means no other version shares this data_dir
+                ver.get_data_dir()
+                    .filter(|&data_dir| xlmeta.shard_data_dir_count(&search_version_id, &Some(data_dir)) == 0)
+            })
+        };
+        if let Some(old_data_dir) = has_old_data_dir.as_ref() {
+            let _ = xlmeta.data.remove(vec![search_version_id.unwrap_or_default(), *old_data_dir]);
         }
 
         xlmeta.add_version(fi.clone())?;
@@ -2021,10 +2007,6 @@ impl DiskAPI for LocalDisk {
         }
 
         let new_dst_buf = xlmeta.marshal_msg()?;
-        tracing::info!(
-            "CLAUDE DEBUG: rename_data - Marshaled xlmeta, new_dst_buf size: {} bytes",
-            new_dst_buf.len()
-        );
 
         self.write_all(src_volume, format!("{}/{}", &src_path, STORAGE_FORMAT_FILE).as_str(), new_dst_buf.into())
             .await?;
@@ -2300,7 +2282,6 @@ impl DiskAPI for LocalDisk {
         let buf = match self.read_all_data(volume, &volume_dir, &xl_path).await {
             Ok(res) => res,
             Err(err) => {
-                //
                 if err != DiskError::FileNotFound {
                     return Err(err);
                 }

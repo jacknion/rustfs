@@ -16,7 +16,7 @@ use rustfs_audit::system::AuditSystemState;
 use rustfs_audit::{AuditError, AuditResult, audit_system, init_audit_system};
 use rustfs_config::DEFAULT_DELIMITER;
 use rustfs_ecstore::config::GLOBAL_SERVER_CONFIG;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 /// Start the audit system.
 /// This function checks if the audit subsystem is configured in the global server configuration.
@@ -26,7 +26,7 @@ use tracing::{error, info, warn};
 pub(crate) async fn start_audit_system() -> AuditResult<()> {
     info!(
         target: "rustfs::main::start_audit_system",
-        "Step 1: Initializing the audit system..."
+        "Initializing the audit system..."
     );
 
     // 1. Get the global configuration loaded by ecstore
@@ -39,7 +39,7 @@ pub(crate) async fn start_audit_system() -> AuditResult<()> {
             config.clone()
         }
         None => {
-            error!(
+            warn!(
                 target: "rustfs::main::start_audit_system",
                 "Audit system initialization failed: Global server configuration not loaded."
             );
@@ -89,7 +89,7 @@ pub(crate) async fn start_audit_system() -> AuditResult<()> {
             Ok(())
         }
         Err(e) => {
-            error!(
+            warn!(
                 target: "rustfs::main::start_audit_system",
                 "Audit system startup failed: {:?}",
                 e

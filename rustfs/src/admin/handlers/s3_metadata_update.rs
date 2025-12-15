@@ -112,7 +112,7 @@ impl Operation for UpdateS3MetadataHandler {
         // Read request body
         let mut input = req.input;
         let body_bytes = input
-            .store_all_unlimited()
+            .store_all_limited(usize::MAX)
             .await
             .map_err(|e| s3_error!(InvalidRequest, "Failed to read request body: {}", e))?;
 

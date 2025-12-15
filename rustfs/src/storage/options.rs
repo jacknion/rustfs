@@ -65,14 +65,11 @@ pub async fn del_opts(
     let vid = vid.map(|v| v.as_str().trim().to_owned());
 
     if let Some(ref id) = vid {
-        if let Err(err) = Uuid::parse_str(id.as_str()) {
+        if *id != Uuid::nil().to_string()
+            && let Err(err) = Uuid::parse_str(id.as_str())
+        {
             error!("del_opts: invalid version id: {} error: {}", id, err);
             return Err(StorageError::InvalidVersionID(bucket.to_owned(), object.to_owned(), id.clone()));
-        }
-
-        if !versioned {
-            error!("del_opts: object not versioned: {}", object);
-            return Err(StorageError::InvalidArgument(bucket.to_owned(), object.to_owned(), id.clone()));
         }
     }
 
@@ -83,7 +80,7 @@ pub async fn del_opts(
 
     opts.version_id = {
         if is_dir_object(object) && vid.is_none() {
-            Some(Uuid::max().to_string())
+            Some(Uuid::nil().to_string())
         } else {
             vid
         }
@@ -95,6 +92,8 @@ pub async fn del_opts(
         .get(RUSTFS_BUCKET_REPLICATION_DELETE_MARKER)
         .map(|v| v.to_str().unwrap() == "true")
         .unwrap_or_default();
+
+    fill_conditional_writes_opts_from_header(headers, &mut opts)?;
 
     Ok(opts)
 }
@@ -113,12 +112,10 @@ pub async fn get_opts(
     let vid = vid.map(|v| v.as_str().trim().to_owned());
 
     if let Some(ref id) = vid {
-        if let Err(_err) = Uuid::parse_str(id.as_str()) {
+        if *id != Uuid::nil().to_string()
+            && let Err(_err) = Uuid::parse_str(id.as_str())
+        {
             return Err(StorageError::InvalidVersionID(bucket.to_owned(), object.to_owned(), id.clone()));
-        }
-
-        if !versioned {
-            return Err(StorageError::InvalidArgument(bucket.to_owned(), object.to_owned(), id.clone()));
         }
     }
 
@@ -127,7 +124,7 @@ pub async fn get_opts(
 
     opts.version_id = {
         if is_dir_object(object) && vid.is_none() {
-            Some(Uuid::max().to_string())
+            Some(Uuid::nil().to_string())
         } else {
             vid
         }
@@ -137,6 +134,8 @@ pub async fn get_opts(
 
     opts.version_suspended = version_suspended;
     opts.versioned = versioned;
+
+    fill_conditional_writes_opts_from_header(headers, &mut opts)?;
 
     Ok(opts)
 }
@@ -189,12 +188,10 @@ pub async fn put_opts(
     let vid = vid.map(|v| v.as_str().trim().to_owned());
 
     if let Some(ref id) = vid {
-        if let Err(_err) = Uuid::parse_str(id.as_str()) {
+        if *id != Uuid::nil().to_string()
+            && let Err(_err) = Uuid::parse_str(id.as_str())
+        {
             return Err(StorageError::InvalidVersionID(bucket.to_owned(), object.to_owned(), id.clone()));
-        }
-
-        if !versioned {
-            return Err(StorageError::InvalidArgument(bucket.to_owned(), object.to_owned(), id.clone()));
         }
     }
 
@@ -203,7 +200,7 @@ pub async fn put_opts(
 
     opts.version_id = {
         if is_dir_object(object) && vid.is_none() {
-            Some(Uuid::max().to_string())
+            Some(Uuid::nil().to_string())
         } else {
             vid
         }
@@ -603,7 +600,7 @@ mod tests {
 
         assert!(result.is_ok());
         let opts = result.unwrap();
-        assert_eq!(opts.version_id, Some(Uuid::max().to_string()));
+        assert_eq!(opts.version_id, Some(Uuid::nil().to_string()));
     }
 
     #[tokio::test]
@@ -676,7 +673,7 @@ mod tests {
 
         assert!(result.is_ok());
         let opts = result.unwrap();
-        assert_eq!(opts.version_id, Some(Uuid::max().to_string()));
+        assert_eq!(opts.version_id, Some(Uuid::nil().to_string()));
     }
 
     #[tokio::test]
@@ -720,7 +717,7 @@ mod tests {
 
         assert!(result.is_ok());
         let opts = result.unwrap();
-        assert_eq!(opts.version_id, Some(Uuid::max().to_string()));
+        assert_eq!(opts.version_id, Some(Uuid::nil().to_string()));
     }
 
     #[tokio::test]

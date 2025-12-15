@@ -14,6 +14,7 @@
 
 pub mod access;
 pub mod database;
+pub mod concurrency;
 pub mod ecfs;
 pub(crate) mod entity;
 pub(crate) mod helper;
@@ -21,3 +22,6 @@ pub mod metadata_extractor;
 pub mod metadata_sync_hooks;
 pub mod options;
 pub mod tonic_service;
+
+#[cfg(test)]
+mod concurrent_get_object_test;

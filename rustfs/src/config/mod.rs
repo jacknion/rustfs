@@ -17,6 +17,8 @@ use const_str::concat;
 use std::string::ToString;
 shadow_rs::shadow!(build);
 
+pub mod workload_profiles;
+
 #[cfg(test)]
 mod config_test;
 
@@ -120,6 +122,16 @@ pub struct Opt {
     /// Maximum number of database connections in the pool
     #[arg(long, default_value_t = 10, env = "RUSTFS_DATABASE_MAX_CONNECTIONS")]
     pub database_max_connections: u32,
+
+    /// Disable adaptive buffer sizing with workload profiles
+    /// Set this flag to use legacy fixed-size buffer behavior from PR #869
+    #[arg(long, default_value_t = false, env = "RUSTFS_BUFFER_PROFILE_DISABLE")]
+    pub buffer_profile_disable: bool,
+
+    /// Workload profile for adaptive buffer sizing
+    /// Options: GeneralPurpose, AiTraining, DataAnalytics, WebWorkload, IndustrialIoT, SecureStorage
+    #[arg(long, default_value_t = String::from("GeneralPurpose"), env = "RUSTFS_BUFFER_PROFILE")]
+    pub buffer_profile: String,
 }
 
 // lazy_static::lazy_static! {

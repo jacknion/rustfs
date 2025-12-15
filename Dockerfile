@@ -66,8 +66,8 @@ COPY entrypoint.sh /entrypoint.sh
 
 RUN chmod +x /usr/bin/rustfs /entrypoint.sh
 
-RUN addgroup -g 1000 -S rustfs && \
-    adduser -u 1000 -G rustfs -S rustfs -D && \
+RUN addgroup -g 10001 -S rustfs && \
+    adduser -u 10001 -G rustfs -S rustfs -D && \
     mkdir -p /data /logs && \
     chown -R rustfs:rustfs /data /logs && \
     chmod 0750 /data /logs
@@ -81,13 +81,11 @@ ENV RUSTFS_ADDRESS=":9000" \
     RUSTFS_CORS_ALLOWED_ORIGINS="*" \
     RUSTFS_CONSOLE_CORS_ALLOWED_ORIGINS="*" \
     RUSTFS_VOLUMES="/data" \
-    RUST_LOG="warn" \
-    RUSTFS_OBS_LOG_DIRECTORY="/logs" \
-    RUSTFS_SINKS_FILE_PATH="/logs"
-
+    RUST_LOG="warn"
+    
 EXPOSE 9000 9001
 
-VOLUME ["/data", "/logs"]
+VOLUME ["/data"]
 
 USER rustfs
 

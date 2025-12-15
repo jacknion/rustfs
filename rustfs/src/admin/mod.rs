@@ -23,8 +23,8 @@ pub mod utils;
 mod console_test;
 
 use handlers::{
-    GetReplicationMetricsHandler, HealthCheckHandler, ListRemoteTargetHandler, RemoveRemoteTargetHandler, SetRemoteTargetHandler,
-    bucket_meta,
+    GetReplicationMetricsHandler, HealthCheckHandler, IsAdminHandler, ListRemoteTargetHandler, RemoveRemoteTargetHandler,
+    SetRemoteTargetHandler, bucket_meta,
     database::{DatabaseExampleQueryHandler, DatabaseHealthHandler},
     event::{ListNotificationTargets, ListTargetsArns, NotificationTarget, RemoveNotificationTarget},
     group, kms, kms_dynamic, kms_keys, policies, pools,
@@ -47,6 +47,7 @@ pub fn make_admin_route(console_enabled: bool) -> std::io::Result<impl S3Route> 
 
     // Health check endpoint for monitoring and orchestration
     r.insert(Method::GET, "/health", AdminOperation(&HealthCheckHandler {}))?;
+    r.insert(Method::HEAD, "/health", AdminOperation(&HealthCheckHandler {}))?;
     r.insert(Method::GET, "/profile/cpu", AdminOperation(&TriggerProfileCPU {}))?;
     r.insert(Method::GET, "/profile/memory", AdminOperation(&TriggerProfileMemory {}))?;
 
@@ -76,6 +77,12 @@ pub fn make_admin_route(console_enabled: bool) -> std::io::Result<impl S3Route> 
 
     // 1
     r.insert(Method::POST, "/", AdminOperation(&sts::AssumeRoleHandle {}))?;
+
+    r.insert(
+        Method::GET,
+        format!("{}{}", ADMIN_PREFIX, "/v3/is-admin").as_str(),
+        AdminOperation(&IsAdminHandler {}),
+    )?;
 
     register_rpc_route(&mut r)?;
     register_user_route(&mut r)?;
@@ -162,6 +169,11 @@ pub fn make_admin_route(console_enabled: bool) -> std::io::Result<impl S3Route> 
 
     // Some APIs are only available in EC mode
     // if is_dist_erasure().await || is_erasure().await {
+    r.insert(
+        Method::POST,
+        format!("{}{}", ADMIN_PREFIX, "/v3/heal/{bucket}").as_str(),
+        AdminOperation(&handlers::HealHandler {}),
+    )?;
     r.insert(
         Method::POST,
         format!("{}{}", ADMIN_PREFIX, "/v3/heal/{bucket}/{prefix}").as_str(),

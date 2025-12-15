@@ -34,7 +34,7 @@ use std::{collections::HashMap, io::Cursor};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::io::AsyncRead;
-use tracing::error;
+use tracing::{error, warn};
 use uuid::Uuid;
 use xxhash_rust::xxh64;
 
@@ -427,17 +427,26 @@ impl FileMeta {
             return;
         }
 
-        self.versions.reverse();
-
-        // for _v in self.versions.iter() {
-        //     //  warn!("sort {} {:?}", i, v);
-        // }
+        self.versions.sort_by(|a, b| {
+            if a.header.mod_time != b.header.mod_time {
+                b.header.mod_time.cmp(&a.header.mod_time)
+            } else if a.header.version_type != b.header.version_type {
+                b.header.version_type.cmp(&a.header.version_type)
+            } else if a.header.version_id != b.header.version_id {
+                b.header.version_id.cmp(&a.header.version_id)
+            } else if a.header.flags != b.header.flags {
+                b.header.flags.cmp(&a.header.flags)
+            } else {
+                b.cmp(a)
+            }
+        });
     }
 
     // Find version
     pub fn find_version(&self, vid: Option<Uuid>) -> Result<(usize, FileMetaVersion)> {
+        let vid = vid.unwrap_or_default();
         for (i, fver) in self.versions.iter().enumerate() {
-            if fver.header.version_id == vid {
+            if fver.header.version_id == Some(vid) {
                 let version = self.get_idx(i)?;
                 return Ok((i, version));
             }
@@ -448,9 +457,12 @@ impl FileMeta {
 
     // shard_data_dir_count queries the count of data_dir under vid
     pub fn shard_data_dir_count(&self, vid: &Option<Uuid>, data_dir: &Option<Uuid>) -> usize {
+        let vid = vid.unwrap_or_default();
         self.versions
             .iter()
-            .filter(|v| v.header.version_type == VersionType::Object && v.header.version_id != *vid && v.header.user_data_dir())
+            .filter(|v| {
+                v.header.version_type == VersionType::Object && v.header.version_id != Some(vid) && v.header.user_data_dir()
+            })
             .map(|v| FileMetaVersion::decode_data_dir_from_meta(&v.meta).unwrap_or_default())
             .filter(|v| v == data_dir)
             .count()
@@ -489,25 +501,27 @@ impl FileMeta {
 
         self.versions.sort_by(|a, b| {
             if a.header.mod_time != b.header.mod_time {
-                a.header.mod_time.cmp(&b.header.mod_time)
+                b.header.mod_time.cmp(&a.header.mod_time)
             } else if a.header.version_type != b.header.version_type {
-                a.header.version_type.cmp(&b.header.version_type)
+                b.header.version_type.cmp(&a.header.version_type)
             } else if a.header.version_id != b.header.version_id {
-                a.header.version_id.cmp(&b.header.version_id)
+                b.header.version_id.cmp(&a.header.version_id)
             } else if a.header.flags != b.header.flags {
-                a.header.flags.cmp(&b.header.flags)
+                b.header.flags.cmp(&a.header.flags)
             } else {
-                a.cmp(b)
+                b.cmp(a)
             }
         });
         Ok(())
     }
 
-    pub fn add_version(&mut self, fi: FileInfo) -> Result<()> {
-        let vid = fi.version_id;
+    pub fn add_version(&mut self, mut fi: FileInfo) -> Result<()> {
+        if fi.version_id.is_none() {
+            fi.version_id = Some(Uuid::nil());
+        }
 
         if let Some(ref data) = fi.data {
-            let key = vid.unwrap_or_default().to_string();
+            let key = fi.version_id.unwrap_or_default().to_string();
             self.data.replace(&key, data.to_vec())?;
         }
 
@@ -521,12 +535,13 @@ impl FileMeta {
             return Err(Error::other("file meta version invalid"));
         }
 
-        // 1000 is the limit of versions TODO: make it configurable
-        if self.versions.len() + 1 > 1000 {
-            return Err(Error::other(
-                "You've exceeded the limit on the number of versions you can create on this object",
-            ));
-        }
+        // TODO: make it configurable
+        // 1000 is the limit of versions
+        // if self.versions.len() + 1 > 1000 {
+        //     return Err(Error::other(
+        //         "You've exceeded the limit on the number of versions you can create on this object",
+        //     ));
+        // }
 
         if self.versions.is_empty() {
             self.versions.push(FileMetaShallowVersion::try_from(version)?);
@@ -551,7 +566,6 @@ impl FileMeta {
                 }
             }
         }
-
         Err(Error::other("add_version failed"))
 
         // if !ver.valid() {
@@ -583,12 +597,19 @@ impl FileMeta {
     }
 
     // delete_version deletes version, returns data_dir
+    #[tracing::instrument(skip(self))]
     pub fn delete_version(&mut self, fi: &FileInfo) -> Result<Option<Uuid>> {
+        let vid = if fi.version_id.is_none() {
+            Some(Uuid::nil())
+        } else {
+            Some(fi.version_id.unwrap())
+        };
+
         let mut ventry = FileMetaVersion::default();
         if fi.deleted {
             ventry.version_type = VersionType::Delete;
             ventry.delete_marker = Some(MetaDeleteMarker {
-                version_id: fi.version_id,
+                version_id: vid,
                 mod_time: fi.mod_time,
                 ..Default::default()
             });
@@ -598,7 +619,7 @@ impl FileMeta {
             }
         }
 
-        let mut update_version = fi.mark_deleted;
+        let mut update_version = false;
         if fi.version_purge_status().is_empty()
             && (fi.delete_marker_replication_status() == ReplicationStatusType::Replica
                 || fi.delete_marker_replication_status() == ReplicationStatusType::Empty)
@@ -689,8 +710,10 @@ impl FileMeta {
             }
         }
 
+        let mut found_index = None;
+
         for (i, ver) in self.versions.iter().enumerate() {
-            if ver.header.version_id != fi.version_id {
+            if ver.header.version_id != vid {
                 continue;
             }
 
@@ -701,7 +724,7 @@ impl FileMeta {
                         let mut v = self.get_idx(i)?;
                         if v.delete_marker.is_none() {
                             v.delete_marker = Some(MetaDeleteMarker {
-                                version_id: fi.version_id,
+                                version_id: vid,
                                 mod_time: fi.mod_time,
                                 meta_sys: HashMap::new(),
                             });
@@ -767,7 +790,7 @@ impl FileMeta {
                     self.versions.remove(i);
 
                     if (fi.mark_deleted && fi.version_purge_status() != VersionPurgeStatusType::Complete)
-                        || (fi.deleted && fi.version_id.is_none())
+                        || (fi.deleted && vid == Some(Uuid::nil()))
                     {
                         self.add_version_filemata(ventry)?;
                     }
@@ -803,15 +826,8 @@ impl FileMeta {
 
                         return Ok(old_dir);
                     }
+                    found_index = Some(i);
                 }
-            }
-        }
-
-        let mut found_index = None;
-        for (i, version) in self.versions.iter().enumerate() {
-            if version.header.version_type == VersionType::Object && version.header.version_id == fi.version_id {
-                found_index = Some(i);
-                break;
             }
         }
 
@@ -878,12 +894,11 @@ impl FileMeta {
         read_data: bool,
         all_parts: bool,
     ) -> Result<FileInfo> {
-        let has_vid = {
+        let vid = {
             if !version_id.is_empty() {
-                let id = Uuid::parse_str(version_id)?;
-                if !id.is_nil() { Some(id) } else { None }
+                Uuid::parse_str(version_id)?
             } else {
-                None
+                Uuid::nil()
             }
         };
 
@@ -893,12 +908,12 @@ impl FileMeta {
         for ver in self.versions.iter() {
             let header = &ver.header;
 
-            if let Some(vid) = has_vid {
-                if header.version_id != Some(vid) {
-                    is_latest = false;
-                    succ_mod_time = header.mod_time;
-                    continue;
-                }
+            // TODO: freeVersion
+
+            if !version_id.is_empty() && header.version_id != Some(vid) {
+                is_latest = false;
+                succ_mod_time = header.mod_time;
+                continue;
             }
 
             let mut fi = ver.into_fileinfo(volume, path, all_parts)?;
@@ -920,7 +935,7 @@ impl FileMeta {
             return Ok(fi);
         }
 
-        if has_vid.is_none() {
+        if version_id.is_empty() {
             Err(Error::FileNotFound)
         } else {
             Err(Error::FileVersionNotFound)
@@ -1079,13 +1094,10 @@ impl FileMeta {
 
     /// Count shared data directories
     pub fn shared_data_dir_count(&self, version_id: Option<Uuid>, data_dir: Option<Uuid>) -> usize {
+        let version_id = version_id.unwrap_or_default();
+
         if self.data.entries().unwrap_or_default() > 0
-            && version_id.is_some()
-            && self
-                .data
-                .find(version_id.unwrap().to_string().as_str())
-                .unwrap_or_default()
-                .is_some()
+            && self.data.find(version_id.to_string().as_str()).unwrap_or_default().is_some()
         {
             return 0;
         }
@@ -1093,7 +1105,9 @@ impl FileMeta {
         self.versions
             .iter()
             .filter(|v| {
-                v.header.version_type == VersionType::Object && v.header.version_id != version_id && v.header.user_data_dir()
+                v.header.version_type == VersionType::Object
+                    && v.header.version_id != Some(version_id)
+                    && v.header.user_data_dir()
             })
             .filter_map(|v| FileMetaVersion::decode_data_dir_from_meta(&v.meta).ok())
             .filter(|&dir| dir == data_dir)
@@ -1521,7 +1535,8 @@ impl FileMetaVersionHeader {
         cur.read_exact(&mut buf)?;
         self.version_id = {
             let id = Uuid::from_bytes(buf);
-            if id.is_nil() { None } else { Some(id) }
+            // if id.is_nil() { None } else { Some(id) }
+            Some(id)
         };
 
         // mod_time

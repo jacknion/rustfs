@@ -13,7 +13,13 @@
 // limitations under the License.
 
 use crate::auth::get_condition_values;
+use crate::config::workload_profiles::{
+    RustFSBufferConfig, WorkloadProfile, get_global_buffer_config, is_buffer_profile_enabled,
+};
 use crate::error::ApiError;
+use crate::storage::concurrency::{
+    CachedGetObject, ConcurrencyManager, GetObjectGuard, get_concurrency_aware_buffer_size, get_concurrency_manager,
+};
 use crate::storage::entity;
 use crate::storage::helper::OperationHelper;
 use crate::storage::metadata_sync_hooks::{sync_delete_object_metadata, sync_put_object_metadata};
@@ -62,7 +68,7 @@ use rustfs_ecstore::{
     disk::{error::DiskError, error_reduce::is_all_buckets_not_found},
     error::{StorageError, is_err_bucket_not_found, is_err_object_not_found, is_err_version_not_found},
     new_object_layer_fn,
-    set_disk::{DEFAULT_READ_BUFFER_SIZE, MAX_PARTS_COUNT, is_valid_storage_class},
+    set_disk::{MAX_PARTS_COUNT, is_valid_storage_class},
     store_api::{
         BucketOptions,
         CompletePart,
@@ -103,7 +109,7 @@ use rustfs_s3select_api::{
 use rustfs_s3select_query::get_global_db;
 use rustfs_targets::{
     EventName,
-    arn::{TargetID, TargetIDError},
+    arn::{ARN, TargetID, TargetIDError},
 };
 use rustfs_utils::{
     CompressionAlgorithm, extract_req_params_header, extract_resp_elements, get_request_host, get_request_user_agent,
@@ -119,6 +125,8 @@ use rustfs_utils::{
 use rustfs_zip::CompressionFormat;
 use s3s::header::{X_AMZ_RESTORE, X_AMZ_RESTORE_OUTPUT_PATH};
 use s3s::{S3, S3Error, S3ErrorCode, S3Request, S3Response, S3Result, dto::*, s3_error};
+use std::convert::Infallible;
+use std::ops::Add;
 use std::{
     collections::HashMap,
     fmt::Debug,
@@ -149,6 +157,103 @@ static RUSTFS_OWNER: LazyLock<Owner> = LazyLock::new(|| Owner {
     display_name: Some("rustfs".to_owned()),
     id: Some("c19050dbcee97fda828689dda99097a6321af2248fa760517237346e5d9c8a66".to_owned()),
 });
+
+/// Calculate adaptive buffer size with workload profile support.
+///
+/// This enhanced version supports different workload profiles for optimal performance
+/// across various use cases (AI/ML, web workloads, secure storage, etc.).
+///
+/// # Arguments
+/// * `file_size` - The size of the file in bytes, or -1 if unknown
+/// * `profile` - Optional workload profile. If None, uses auto-detection or GeneralPurpose
+///
+/// # Returns
+/// Optimal buffer size in bytes based on the workload profile and file size
+///
+/// # Examples
+/// ```ignore
+/// // Use general purpose profile (default)
+/// let buffer_size = get_adaptive_buffer_size_with_profile(1024 * 1024, None);
+///
+/// // Use AI training profile for large model files
+/// let buffer_size = get_adaptive_buffer_size_with_profile(
+///     500 * 1024 * 1024,
+///     Some(WorkloadProfile::AiTraining)
+/// );
+///
+/// // Use secure storage profile for compliance scenarios
+/// let buffer_size = get_adaptive_buffer_size_with_profile(
+///     10 * 1024 * 1024,
+///     Some(WorkloadProfile::SecureStorage)
+/// );
+/// ```
+///
+#[allow(dead_code)]
+fn get_adaptive_buffer_size_with_profile(file_size: i64, profile: Option<WorkloadProfile>) -> usize {
+    let config = match profile {
+        Some(p) => RustFSBufferConfig::new(p),
+        None => {
+            // Auto-detect OS environment or use general purpose
+            RustFSBufferConfig::with_auto_detect()
+        }
+    };
+
+    config.get_buffer_size(file_size)
+}
+
+/// Get adaptive buffer size using global workload profile configuration.
+///
+/// This is the primary buffer sizing function that uses the workload profile
+/// system configured at startup to provide optimal buffer sizes for different scenarios.
+///
+/// The function automatically selects buffer sizes based on:
+/// - Configured workload profile (default: GeneralPurpose)
+/// - File size characteristics
+/// - Optional performance metrics collection
+///
+/// # Arguments
+/// * `file_size` - The size of the file in bytes, or -1 if unknown
+///
+/// # Returns
+/// Optimal buffer size in bytes based on the configured workload profile
+///
+/// # Performance Metrics
+/// When compiled with the `metrics` feature flag, this function tracks:
+/// - Buffer size distribution
+/// - Selection frequency
+/// - Buffer-to-file size ratios
+///
+/// # Examples
+/// ```ignore
+/// // Uses configured profile (default: GeneralPurpose)
+/// let buffer_size = get_buffer_size_opt_in(file_size);
+/// ```
+fn get_buffer_size_opt_in(file_size: i64) -> usize {
+    let buffer_size = if is_buffer_profile_enabled() {
+        // Use globally configured workload profile (enabled by default in Phase 3)
+        let config = get_global_buffer_config();
+        config.get_buffer_size(file_size)
+    } else {
+        // Opt-out mode: Use GeneralPurpose profile for consistent behavior
+        let config = RustFSBufferConfig::new(WorkloadProfile::GeneralPurpose);
+        config.get_buffer_size(file_size)
+    };
+
+    // Optional performance metrics collection for monitoring and optimization
+    #[cfg(feature = "metrics")]
+    {
+        use metrics::histogram;
+        histogram!("rustfs.buffer.size.bytes").record(buffer_size as f64);
+        counter!("rustfs.buffer.size.selections").increment(1);
+
+        if file_size >= 0 {
+            let ratio = buffer_size as f64 / file_size as f64;
+            histogram!("rustfs.buffer.to.file.ratio").record(ratio);
+        }
+    }
+
+    buffer_size
+}
 
 #[derive(Debug, Clone)]
 pub struct FS {
@@ -348,6 +453,31 @@ fn is_managed_sse(algorithm: &ServerSideEncryption) -> bool {
     matches!(algorithm.as_str(), "AES256" | "aws:kms")
 }
 
+/// Validate object key for control characters and log special characters
+///
+/// This function:
+/// 1. Rejects keys containing control characters (null bytes, newlines, carriage returns)
+/// 2. Logs debug information for keys containing spaces, plus signs, or percent signs
+///
+/// The s3s library handles URL decoding, so keys are already decoded when they reach this function.
+/// This validation ensures that invalid characters that could cause issues are rejected early.
+fn validate_object_key(key: &str, operation: &str) -> S3Result<()> {
+    // Validate object key doesn't contain control characters
+    if key.contains(['\0', '\n', '\r']) {
+        return Err(S3Error::with_message(
+            S3ErrorCode::InvalidArgument,
+            format!("Object key contains invalid control characters: {key:?}"),
+        ));
+    }
+
+    // Log debug info for keys with special characters to help diagnose encoding issues
+    if key.contains([' ', '+', '%']) {
+        debug!("{} object with special characters in key: {:?}", operation, key);
+    }
+
+    Ok(())
+}
+
 impl FS {
     pub fn new() -> Self {
         // let store: ECStore = ECStore::new(address, endpoint_pools).await?;
@@ -371,8 +501,6 @@ impl FS {
         let event_version_id = version_id;
         let Some(body) = body else { return Err(s3_error!(IncompleteBody)) };
 
-        let body = StreamReader::new(body.map(|f| f.map_err(|e| std::io::Error::other(e.to_string()))));
-
         let size = match content_length {
             Some(c) => c,
             None => {
@@ -386,6 +514,15 @@ impl FS {
                 }
             }
         };
+
+        // Apply adaptive buffer sizing based on file size for optimal streaming performance.
+        // Uses workload profile configuration (enabled by default) to select appropriate buffer size.
+        // Buffer sizes range from 32KB to 4MB depending on file size and configured workload profile.
+        let buffer_size = get_buffer_size_opt_in(size);
+        let body = tokio::io::BufReader::with_capacity(
+            buffer_size,
+            StreamReader::new(body.map(|f| f.map_err(|e| std::io::Error::other(e.to_string())))),
+        );
 
         let Some(ext) = Path::new(&key).extension().and_then(|s| s.to_str()) else {
             return Err(s3_error!(InvalidArgument, "key extension not found"));
@@ -491,6 +628,14 @@ impl FS {
 
                 // Sync metadata to database (non-blocking)
                 sync_put_object_metadata(&_obj_info, req.credentials.as_ref().map(|c| c.access_key.clone()));
+
+                // Invalidate cache for the written object to prevent stale data
+                let manager = get_concurrency_manager();
+                let fpath_clone = fpath.clone();
+                let bucket_clone = bucket.clone();
+                tokio::spawn(async move {
+                    manager.invalidate_cache_versioned(&bucket_clone, &fpath_clone, None).await;
+                });
 
                 let e_tag = _obj_info.etag.clone().map(|etag| to_s3s_etag(&etag));
 
@@ -663,6 +808,10 @@ impl S3 for FS {
             } => (bucket.to_string(), key.to_string(), version_id.map(|v| v.to_string())),
         };
 
+        // Validate both source and destination keys
+        validate_object_key(&src_key, "COPY (source)")?;
+        validate_object_key(&key, "COPY (dest)")?;
+
         // warn!("copy_object {}/{}, to {}/{}", &src_bucket, &src_key, &bucket, &key);
 
         let mut src_opts = copy_src_opts(&src_bucket, &src_key, &req.headers).map_err(ApiError::from)?;
@@ -810,6 +959,17 @@ impl S3 for FS {
             .copy_object(&src_bucket, &src_key, &bucket, &key, &mut src_info, &src_opts, &dst_opts)
             .await
             .map_err(ApiError::from)?;
+
+        // Invalidate cache for the destination object to prevent stale data
+        let manager = get_concurrency_manager();
+        let dest_bucket = bucket.clone();
+        let dest_key = key.clone();
+        let dest_version = oi.version_id.map(|v| v.to_string());
+        tokio::spawn(async move {
+            manager
+                .invalidate_cache_versioned(&dest_bucket, &dest_key, dest_version.as_deref())
+                .await;
+        });
 
         // warn!("copy_object oi {:?}", &oi);
         let object_info = oi.clone();
@@ -1046,7 +1206,7 @@ impl S3 for FS {
                 warn!("unable to restore transitioned bucket/object {}/{}: {}", bucket, object, err.to_string());
                 return Err(S3Error::with_message(
                     S3ErrorCode::Custom("ErrRestoreTransitionedObject".into()),
-                    format!("unable to restore transitioned bucket/object {}/{}: {}", bucket, object, err),
+                    format!("unable to restore transitioned bucket/object {bucket}/{object}: {err}"),
                 ));
             }
 
@@ -1102,6 +1262,9 @@ impl S3 for FS {
         let DeleteObjectInput {
             bucket, key, version_id, ..
         } = req.input.clone();
+
+        // Validate object key
+        validate_object_key(&key, "DELETE")?;
 
         let replica = req
             .headers
@@ -1161,6 +1324,17 @@ impl S3 for FS {
                 }
             }
         };
+
+        // Invalidate cache for the deleted object
+        let manager = get_concurrency_manager();
+        let del_bucket = bucket.clone();
+        let del_key = key.clone();
+        let del_version = obj_info.version_id.map(|v| v.to_string());
+        tokio::spawn(async move {
+            manager
+                .invalidate_cache_versioned(&del_bucket, &del_key, del_version.as_deref())
+                .await;
+        });
 
         if obj_info.name.is_empty() {
             return Ok(S3Response::with_status(DeleteObjectOutput::default(), StatusCode::NO_CONTENT));
@@ -1283,12 +1457,17 @@ impl S3 for FS {
                 ..Default::default()
             };
 
-            let opts = ObjectOptions {
-                version_id: object.version_id.map(|v| v.to_string()),
-                versioned: version_cfg.prefix_enabled(&object.object_name),
-                version_suspended: version_cfg.suspended(),
-                ..Default::default()
-            };
+            let metadata = extract_metadata(&req.headers);
+
+            let opts: ObjectOptions = del_opts(
+                &bucket,
+                &object.object_name,
+                object.version_id.map(|f| f.to_string()),
+                &req.headers,
+                metadata,
+            )
+            .await
+            .map_err(ApiError::from)?;
 
             let mut goi = ObjectInfo::default();
             let mut gerr = None;
@@ -1301,7 +1480,7 @@ impl S3 for FS {
             }
 
             if is_dir_object(&object.object_name) && object.version_id.is_none() {
-                object.version_id = Some(Uuid::max());
+                object.version_id = Some(Uuid::nil());
             }
 
             if replicate_deletes {
@@ -1345,6 +1524,22 @@ impl S3 for FS {
                 )
                 .await
         };
+
+        // Invalidate cache for successfully deleted objects
+        let manager = get_concurrency_manager();
+        let bucket_clone = bucket.clone();
+        let deleted_objects = dobjs.clone();
+        tokio::spawn(async move {
+            for dobj in deleted_objects {
+                manager
+                    .invalidate_cache_versioned(
+                        &bucket_clone,
+                        &dobj.object_name,
+                        dobj.version_id.map(|v| v.to_string()).as_deref(),
+                    )
+                    .await;
+            }
+        });
 
         if is_all_buckets_not_found(
             &errs
@@ -1512,6 +1707,21 @@ impl S3 for FS {
         fields(start_time=?time::OffsetDateTime::now_utc())
     )]
     async fn get_object(&self, req: S3Request<GetObjectInput>) -> S3Result<S3Response<GetObjectOutput>> {
+        let request_start = std::time::Instant::now();
+
+        // Track this request for concurrency-aware optimizations
+        let _request_guard = ConcurrencyManager::track_request();
+        let concurrent_requests = GetObjectGuard::concurrent_requests();
+
+        #[cfg(feature = "metrics")]
+        {
+            use metrics::{counter, gauge};
+            counter!("rustfs.get.object.requests.total").increment(1);
+            gauge!("rustfs.concurrent.get.object.requests").set(concurrent_requests as f64);
+        }
+
+        debug!("GetObject request started with {} concurrent requests", concurrent_requests);
+
         let mut helper = OperationHelper::new(&req, EventName::ObjectAccessedGet, "s3:GetObject");
         // mc get 3
 
@@ -1523,6 +1733,107 @@ impl S3 for FS {
             range,
             ..
         } = req.input.clone();
+
+        // Validate object key
+        validate_object_key(&key, "GET")?;
+
+        // Try to get from cache for small, frequently accessed objects
+        let manager = get_concurrency_manager();
+        // Generate cache key with version support: "{bucket}/{key}" or "{bucket}/{key}?versionId={vid}"
+        let cache_key = ConcurrencyManager::make_cache_key(&bucket, &key, version_id.as_deref());
+
+        // Only attempt cache lookup if caching is enabled and for objects without range/part requests
+        if manager.is_cache_enabled() && part_number.is_none() && range.is_none() {
+            if let Some(cached) = manager.get_cached_object(&cache_key).await {
+                let cache_serve_duration = request_start.elapsed();
+
+                debug!("Serving object from response cache: {} (latency: {:?})", cache_key, cache_serve_duration);
+
+                #[cfg(feature = "metrics")]
+                {
+                    use metrics::{counter, histogram};
+                    counter!("rustfs.get.object.cache.served.total").increment(1);
+                    histogram!("rustfs.get.object.cache.serve.duration.seconds").record(cache_serve_duration.as_secs_f64());
+                    histogram!("rustfs.get.object.cache.size.bytes").record(cached.body.len() as f64);
+                }
+
+                // Build response from cached data with full metadata
+                let body_data = cached.body.clone();
+                let body = Some(StreamingBlob::wrap::<_, Infallible>(futures::stream::once(async move { Ok(body_data) })));
+
+                // Parse last_modified from RFC3339 string if available
+                let last_modified = cached
+                    .last_modified
+                    .as_ref()
+                    .and_then(|s| match OffsetDateTime::parse(s, &Rfc3339) {
+                        Ok(dt) => Some(Timestamp::from(dt)),
+                        Err(e) => {
+                            warn!("Failed to parse cached last_modified '{}': {}", s, e);
+                            None
+                        }
+                    });
+
+                // Parse content_type
+                let content_type = cached.content_type.as_ref().and_then(|ct| ContentType::from_str(ct).ok());
+
+                let output = GetObjectOutput {
+                    body,
+                    content_length: Some(cached.content_length),
+                    accept_ranges: Some("bytes".to_string()),
+                    e_tag: cached.e_tag.as_ref().map(|etag| to_s3s_etag(etag)),
+                    last_modified,
+                    content_type,
+                    cache_control: cached.cache_control.clone(),
+                    content_disposition: cached.content_disposition.clone(),
+                    content_encoding: cached.content_encoding.clone(),
+                    content_language: cached.content_language.clone(),
+                    version_id: cached.version_id.clone(),
+                    delete_marker: Some(cached.delete_marker),
+                    tag_count: cached.tag_count,
+                    metadata: if cached.user_metadata.is_empty() {
+                        None
+                    } else {
+                        Some(cached.user_metadata.clone())
+                    },
+                    ..Default::default()
+                };
+
+                // CRITICAL: Build ObjectInfo for event notification before calling complete().
+                // This ensures S3 bucket notifications (s3:GetObject events) include proper
+                // object metadata for event-driven workflows (Lambda, SNS, SQS).
+                let event_info = ObjectInfo {
+                    bucket: bucket.clone(),
+                    name: key.clone(),
+                    storage_class: cached.storage_class.clone(),
+                    mod_time: cached
+                        .last_modified
+                        .as_ref()
+                        .and_then(|s| time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok()),
+                    size: cached.content_length,
+                    actual_size: cached.content_length,
+                    is_dir: false,
+                    user_defined: cached.user_metadata.clone(),
+                    version_id: cached.version_id.as_ref().and_then(|v| uuid::Uuid::parse_str(v).ok()),
+                    delete_marker: cached.delete_marker,
+                    content_type: cached.content_type.clone(),
+                    content_encoding: cached.content_encoding.clone(),
+                    etag: cached.e_tag.clone(),
+                    ..Default::default()
+                };
+
+                // Set object info and version_id on helper for proper event notification
+                let version_id_str = req.input.version_id.clone().unwrap_or_default();
+                helper = helper.object(event_info).version_id(version_id_str);
+
+                // Call helper.complete() for cache hits to ensure
+                // S3 bucket notifications (s3:GetObject events) are triggered.
+                // This ensures event-driven workflows (Lambda, SNS) work correctly
+                // for both cache hits and misses.
+                let result = Ok(S3Response::new(output));
+                let _ = helper.complete(&result);
+                return result;
+            }
+        }
 
         // TODO: getObjectInArchiveFileHandler object = xxx.zip/xxx/xxx.xxx
 
@@ -1561,12 +1872,60 @@ impl S3 for FS {
 
         let store = get_validated_store(&bucket).await?;
 
+        // ============================================
+        // Adaptive I/O Strategy with Disk Permit
+        // ============================================
+        //
+        // Acquire disk read permit and calculate adaptive I/O strategy
+        // based on the wait time. Longer wait times indicate higher system
+        // load, which triggers more conservative I/O parameters.
+        let permit_wait_start = std::time::Instant::now();
+        let _disk_permit = manager.acquire_disk_read_permit().await;
+        let permit_wait_duration = permit_wait_start.elapsed();
+
+        // Calculate adaptive I/O strategy from permit wait time
+        // This adjusts buffer sizes, read-ahead, and caching behavior based on load
+        // Use 256KB as the base buffer size for strategy calculation
+        let base_buffer_size = get_global_buffer_config().base_config.default_unknown;
+        let io_strategy = manager.calculate_io_strategy(permit_wait_duration, base_buffer_size);
+
+        // Record detailed I/O metrics for monitoring
+        #[cfg(feature = "metrics")]
+        {
+            use metrics::{counter, gauge, histogram};
+            // Record permit wait time histogram
+            histogram!("rustfs.disk.permit.wait.duration.seconds").record(permit_wait_duration.as_secs_f64());
+            // Record current load level as gauge (0=Low, 1=Medium, 2=High, 3=Critical)
+            let load_level_value = match io_strategy.load_level {
+                crate::storage::concurrency::IoLoadLevel::Low => 0.0,
+                crate::storage::concurrency::IoLoadLevel::Medium => 1.0,
+                crate::storage::concurrency::IoLoadLevel::High => 2.0,
+                crate::storage::concurrency::IoLoadLevel::Critical => 3.0,
+            };
+            gauge!("rustfs.io.load.level").set(load_level_value);
+            // Record buffer multiplier as gauge
+            gauge!("rustfs.io.buffer.multiplier").set(io_strategy.buffer_multiplier);
+            // Count strategy selections by load level
+            counter!("rustfs.io.strategy.selected", "level" => format!("{:?}", io_strategy.load_level)).increment(1);
+        }
+
+        // Log strategy details at debug level for troubleshooting
+        debug!(
+            wait_ms = permit_wait_duration.as_millis() as u64,
+            load_level = ?io_strategy.load_level,
+            buffer_size = io_strategy.buffer_size,
+            readahead = io_strategy.enable_readahead,
+            cache_wb = io_strategy.cache_writeback_enabled,
+            "Adaptive I/O strategy calculated"
+        );
+
         let reader = store
             .get_object_reader(bucket.as_str(), key.as_str(), rs.clone(), h, &opts)
             .await
             .map_err(ApiError::from)?;
 
         let info = reader.object_info;
+
         debug!(object_size = info.size, part_count = info.parts.len(), "GET object metadata snapshot");
         for part in &info.parts {
             debug!(
@@ -1601,10 +1960,10 @@ impl S3 for FS {
             }
         }
 
-        let mut content_length = info.size;
+        let mut content_length = info.get_actual_size().map_err(ApiError::from)?;
 
         let content_range = if let Some(rs) = &rs {
-            let total_size = info.get_actual_size().map_err(ApiError::from)?;
+            let total_size = content_length;
             let (start, length) = rs.get_offset_length(total_size).map_err(ApiError::from)?;
             content_length = length;
             Some(format!("bytes {}-{}/{}", start, start as i64 + length - 1, total_size))
@@ -1759,14 +2118,110 @@ impl S3 for FS {
             final_stream = Box::new(limit_reader);
         }
 
-        // For SSE-C encrypted objects, don't use bytes_stream to limit the stream
-        // because DecryptReader needs to read all encrypted data to produce decrypted output
-        let body = if stored_sse_algorithm.is_some() || managed_encryption_applied {
-            info!("Managed SSE: Using unlimited stream for decryption");
-            Some(StreamingBlob::wrap(ReaderStream::with_capacity(final_stream, DEFAULT_READ_BUFFER_SIZE)))
+        // Calculate concurrency-aware buffer size for optimal performance
+        // This adapts based on the number of concurrent GetObject requests
+        // AND the adaptive I/O strategy from permit wait time
+        let base_buffer_size = get_buffer_size_opt_in(response_content_length);
+        let optimal_buffer_size = if io_strategy.buffer_size > 0 {
+            // Use adaptive I/O strategy buffer size (derived from permit wait time)
+            io_strategy.buffer_size.min(base_buffer_size)
         } else {
+            // Fallback to concurrency-aware sizing
+            get_concurrency_aware_buffer_size(response_content_length, base_buffer_size)
+        };
+
+        debug!(
+            "GetObject buffer sizing: file_size={}, base={}, optimal={}, concurrent_requests={}, io_strategy={:?}",
+            response_content_length, base_buffer_size, optimal_buffer_size, concurrent_requests, io_strategy.load_level
+        );
+
+        // Cache writeback logic for small, non-encrypted, non-range objects
+        // Only cache when:
+        // 1. Cache is enabled (RUSTFS_OBJECT_CACHE_ENABLE=true)
+        // 2. No part/range request (full object)
+        // 3. Object size is known and within cache threshold (10MB)
+        // 4. Not encrypted (SSE-C or managed encryption)
+        // 5. I/O strategy allows cache writeback (disabled under critical load)
+        let should_cache = manager.is_cache_enabled()
+            && io_strategy.cache_writeback_enabled
+            && part_number.is_none()
+            && rs.is_none()
+            && !managed_encryption_applied
+            && stored_sse_algorithm.is_none()
+            && response_content_length > 0
+            && (response_content_length as usize) <= manager.max_object_size();
+
+        let body = if should_cache {
+            // Read entire object into memory for caching
+            debug!(
+                "Reading object into memory for caching: key={} size={}",
+                cache_key, response_content_length
+            );
+
+            // Read the stream into a Vec<u8>
+            let mut buf = Vec::with_capacity(response_content_length as usize);
+            if let Err(e) = tokio::io::AsyncReadExt::read_to_end(&mut final_stream, &mut buf).await {
+                error!("Failed to read object into memory for caching: {}", e);
+                return Err(ApiError::from(StorageError::other(format!("Failed to read object for caching: {e}"))).into());
+            }
+
+            // Verify we read the expected amount
+            if buf.len() != response_content_length as usize {
+                warn!(
+                    "Object size mismatch during cache read: expected={} actual={}",
+                    response_content_length,
+                    buf.len()
+                );
+            }
+
+            // Build CachedGetObject with full metadata for cache writeback
+            let last_modified_str = info
+                .mod_time
+                .and_then(|t| match t.format(&time::format_description::well_known::Rfc3339) {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        warn!("Failed to format last_modified for cache writeback: {}", e);
+                        None
+                    }
+                });
+
+            let cached_response = CachedGetObject::new(bytes::Bytes::from(buf.clone()), response_content_length)
+                .with_content_type(info.content_type.clone().unwrap_or_default())
+                .with_e_tag(info.etag.clone().unwrap_or_default())
+                .with_last_modified(last_modified_str.unwrap_or_default());
+
+            // Cache the object in background to avoid blocking the response
+            let cache_key_clone = cache_key.clone();
+            tokio::spawn(async move {
+                let manager = get_concurrency_manager();
+                manager.put_cached_object(cache_key_clone.clone(), cached_response).await;
+                debug!("Object cached successfully with metadata: {}", cache_key_clone);
+            });
+
+            #[cfg(feature = "metrics")]
+            {
+                use metrics::counter;
+                counter!("rustfs.object.cache.writeback.total").increment(1);
+            }
+
+            // Create response from the in-memory data
+            let mem_reader = InMemoryAsyncReader::new(buf);
             Some(StreamingBlob::wrap(bytes_stream(
-                ReaderStream::with_capacity(final_stream, DEFAULT_READ_BUFFER_SIZE),
+                ReaderStream::with_capacity(Box::new(mem_reader), optimal_buffer_size),
+                response_content_length as usize,
+            )))
+        } else if stored_sse_algorithm.is_some() || managed_encryption_applied {
+            // For SSE-C encrypted objects, don't use bytes_stream to limit the stream
+            // because DecryptReader needs to read all encrypted data to produce decrypted output
+            info!(
+                "Managed SSE: Using unlimited stream for decryption with buffer size {}",
+                optimal_buffer_size
+            );
+            Some(StreamingBlob::wrap(ReaderStream::with_capacity(final_stream, optimal_buffer_size)))
+        } else {
+            // Standard streaming path for large objects or range/part requests
+            Some(StreamingBlob::wrap(bytes_stream(
+                ReaderStream::with_capacity(final_stream, optimal_buffer_size),
                 response_content_length as usize,
             )))
         };
@@ -1827,6 +2282,7 @@ impl S3 for FS {
             content_length: Some(response_content_length),
             last_modified,
             content_type,
+            content_encoding: info.content_encoding.clone(),
             accept_ranges: Some("bytes".to_string()),
             content_range,
             e_tag: info.etag.map(|etag| to_s3s_etag(&etag)),
@@ -1846,6 +2302,24 @@ impl S3 for FS {
 
         let version_id = req.input.version_id.clone().unwrap_or_default();
         helper = helper.object(event_info).version_id(version_id);
+
+        let total_duration = request_start.elapsed();
+
+        #[cfg(feature = "metrics")]
+        {
+            use metrics::{counter, histogram};
+            counter!("rustfs.get.object.requests.completed").increment(1);
+            histogram!("rustfs.get.object.total.duration.seconds").record(total_duration.as_secs_f64());
+            histogram!("rustfs.get.object.response.size.bytes").record(response_content_length as f64);
+
+            // Record buffer size that was used
+            histogram!("get.object.buffer.size.bytes").record(optimal_buffer_size as f64);
+        }
+
+        debug!(
+            "GetObject completed: key={} size={} duration={:?} buffer={}",
+            cache_key, response_content_length, total_duration, optimal_buffer_size
+        );
 
         let result = Ok(S3Response::new(output));
         let _ = helper.complete(&result);
@@ -1879,8 +2353,15 @@ impl S3 for FS {
             version_id,
             part_number,
             range,
+            if_none_match,
+            if_match,
+            if_modified_since,
+            if_unmodified_since,
             ..
         } = req.input.clone();
+
+        // Validate object key
+        validate_object_key(&key, "HEAD")?;
 
         let part_number = part_number.map(|v| v as usize);
 
@@ -1917,6 +2398,39 @@ impl S3 for FS {
 
         let info = store.get_object_info(&bucket, &key, &opts).await.map_err(ApiError::from)?;
 
+        if let Some(match_etag) = if_none_match {
+            if let Some(strong_etag) = match_etag.as_etag() {
+                if info.etag.as_ref().is_some_and(|etag| strong_etag.as_strong() == Some(etag.as_str())) {
+                    return Err(S3Error::new(S3ErrorCode::NotModified));
+                }
+            }
+        }
+
+        if let Some(modified_since) = if_modified_since {
+            // obj_time < givenTime + 1s
+            if info.mod_time.is_some_and(|mod_time| {
+                let give_time: OffsetDateTime = modified_since.into();
+                mod_time < give_time.add(time::Duration::seconds(1))
+            }) {
+                return Err(S3Error::new(S3ErrorCode::NotModified));
+            }
+        }
+
+        if let Some(match_etag) = if_match {
+            if let Some(strong_etag) = match_etag.as_etag() {
+                if info.etag.as_ref().is_some_and(|etag| strong_etag.as_strong() != Some(etag.as_str())) {
+                    return Err(S3Error::new(S3ErrorCode::PreconditionFailed));
+                }
+            }
+        } else if let Some(unmodified_since) = if_unmodified_since {
+            if info.mod_time.is_some_and(|mod_time| {
+                let give_time: OffsetDateTime = unmodified_since.into();
+                mod_time > give_time.add(time::Duration::seconds(1))
+            }) {
+                return Err(S3Error::new(S3ErrorCode::PreconditionFailed));
+            }
+        }
+
         let event_info = info.clone();
         let content_type = {
             if let Some(content_type) = &info.content_type {
@@ -1950,6 +2464,13 @@ impl S3 for FS {
             .map(|v| SSECustomerAlgorithm::from(v.clone()));
         let sse_customer_key_md5 = metadata_map.get("x-amz-server-side-encryption-customer-key-md5").cloned();
         let ssekms_key_id = metadata_map.get("x-amz-server-side-encryption-aws-kms-key-id").cloned();
+        // Prefer explicit storage_class from object info; fall back to persisted metadata header.
+        let storage_class = info
+            .storage_class
+            .clone()
+            .or_else(|| metadata_map.get("x-amz-storage-class").cloned())
+            .filter(|s| !s.is_empty())
+            .map(StorageClass::from);
 
         let mut checksum_crc32 = None;
         let mut checksum_crc32c = None;
@@ -1988,6 +2509,7 @@ impl S3 for FS {
         let output = HeadObjectOutput {
             content_length: Some(content_length),
             content_type,
+            content_encoding: info.content_encoding.clone(),
             last_modified,
             e_tag: info.etag.map(|etag| to_s3s_etag(&etag)),
             metadata: filter_object_metadata(&metadata_map),
@@ -2002,6 +2524,7 @@ impl S3 for FS {
             checksum_sha256,
             checksum_crc64nvme,
             checksum_type,
+            storage_class,
             // metadata: object_metadata,
             ..Default::default()
         };
@@ -2023,15 +2546,20 @@ impl S3 for FS {
             return Err(S3Error::with_message(S3ErrorCode::InternalError, "Not init".to_string()));
         };
 
-        let mut bucket_infos = store.list_bucket(&BucketOptions::default()).await.map_err(ApiError::from)?;
-
         let mut req = req;
 
-        if authorize_request(&mut req, Action::S3Action(S3Action::ListAllMyBucketsAction))
-            .await
-            .is_err()
-        {
-            bucket_infos = futures::stream::iter(bucket_infos)
+        if req.credentials.as_ref().is_none_or(|cred| cred.access_key.is_empty()) {
+            return Err(S3Error::with_message(S3ErrorCode::AccessDenied, "Access Denied"));
+        }
+
+        let bucket_infos = if let Err(e) = authorize_request(&mut req, Action::S3Action(S3Action::ListAllMyBucketsAction)).await {
+            if e.code() != &S3ErrorCode::AccessDenied {
+                return Err(e);
+            }
+
+            let mut list_bucket_infos = store.list_bucket(&BucketOptions::default()).await.map_err(ApiError::from)?;
+
+            list_bucket_infos = futures::stream::iter(list_bucket_infos)
                 .filter_map(|info| async {
                     let mut req_clone = req.clone();
                     let req_info = req_clone.extensions.get_mut::<ReqInfo>().expect("ReqInfo not found");
@@ -2051,7 +2579,14 @@ impl S3 for FS {
                 })
                 .collect()
                 .await;
-        }
+
+            if list_bucket_infos.is_empty() {
+                return Err(S3Error::with_message(S3ErrorCode::AccessDenied, "Access Denied"));
+            }
+            list_bucket_infos
+        } else {
+            store.list_bucket(&BucketOptions::default()).await.map_err(ApiError::from)?
+        };
 
         let buckets: Vec<Bucket> = bucket_infos
             .iter()
@@ -2082,6 +2617,7 @@ impl S3 for FS {
             prefix: v2.prefix,
             max_keys: v2.max_keys,
             common_prefixes: v2.common_prefixes,
+            is_truncated: v2.is_truncated,
             ..Default::default()
         }))
     }
@@ -2101,6 +2637,12 @@ impl S3 for FS {
         } = req.input;
 
         let prefix = prefix.unwrap_or_default();
+
+        // Log debug info for prefixes with special characters to help diagnose encoding issues
+        if prefix.contains([' ', '+', '%', '\n', '\r', '\0']) {
+            debug!("LIST objects with special characters in prefix: {:?}", prefix);
+        }
+
         let max_keys = max_keys.unwrap_or(1000);
         if max_keys < 0 {
             return Err(S3Error::with_message(S3ErrorCode::InvalidArgument, "Invalid max keys".to_string()));
@@ -2128,6 +2670,11 @@ impl S3 for FS {
 
         let store = get_validated_store(&bucket).await?;
 
+        let incl_deleted = req
+            .headers
+            .get(rustfs_utils::http::headers::RUSTFS_INCLUDE_DELETED)
+            .is_some_and(|v| v.to_str().unwrap_or_default() == "true");
+
         let object_infos = store
             .list_objects_v2(
                 &bucket,
@@ -2137,6 +2684,7 @@ impl S3 for FS {
                 max_keys,
                 fetch_owner.unwrap_or_default(),
                 start_after,
+                incl_deleted,
             )
             .await
             .map_err(ApiError::from)?;
@@ -2265,7 +2813,7 @@ impl S3 for FS {
             .collect::<Vec<_>>();
 
         let output = ListObjectVersionsOutput {
-            // is_truncated: Some(object_infos.is_truncated),
+            is_truncated: Some(object_infos.is_truncated),
             max_keys: Some(key_count),
             delimiter,
             name: Some(bucket),
@@ -2313,8 +2861,49 @@ impl S3 for FS {
             sse_customer_key_md5,
             ssekms_key_id,
             content_md5,
+            if_match,
+            if_none_match,
             ..
         } = input;
+
+        // Validate object key
+        validate_object_key(&key, "PUT")?;
+
+        if if_match.is_some() || if_none_match.is_some() {
+            let Some(store) = new_object_layer_fn() else {
+                return Err(S3Error::with_message(S3ErrorCode::InternalError, "Not init".to_string()));
+            };
+
+            match store.get_object_info(&bucket, &key, &ObjectOptions::default()).await {
+                Ok(info) => {
+                    if !info.delete_marker {
+                        if let Some(ifmatch) = if_match {
+                            if let Some(strong_etag) = ifmatch.as_etag() {
+                                if info.etag.as_ref().is_some_and(|etag| strong_etag.as_strong() != Some(etag.as_str())) {
+                                    return Err(s3_error!(PreconditionFailed));
+                                }
+                            }
+                        }
+                        if let Some(ifnonematch) = if_none_match {
+                            if let Some(strong_etag) = ifnonematch.as_etag() {
+                                if info.etag.as_ref().is_some_and(|etag| strong_etag.as_strong() == Some(etag.as_str())) {
+                                    return Err(s3_error!(PreconditionFailed));
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    if !is_err_object_not_found(&err) && !is_err_version_not_found(&err) {
+                        return Err(ApiError::from(err).into());
+                    }
+
+                    if if_match.is_some() && (is_err_object_not_found(&err) || is_err_version_not_found(&err)) {
+                        return Err(ApiError::from(err).into());
+                    }
+                }
+            }
+        }
 
         let Some(body) = body else { return Err(s3_error!(IncompleteBody)) };
 
@@ -2336,7 +2925,14 @@ impl S3 for FS {
             return Err(s3_error!(UnexpectedContent));
         }
 
-        let body = StreamReader::new(body.map(|f| f.map_err(|e| std::io::Error::other(e.to_string()))));
+        // Apply adaptive buffer sizing based on file size for optimal streaming performance.
+        // Uses workload profile configuration (enabled by default) to select appropriate buffer size.
+        // Buffer sizes range from 32KB to 4MB depending on file size and configured workload profile.
+        let buffer_size = get_buffer_size_opt_in(size);
+        let body = tokio::io::BufReader::with_capacity(
+            buffer_size,
+            StreamReader::new(body.map(|f| f.map_err(|e| std::io::Error::other(e.to_string())))),
+        );
 
         // let body = Box::new(StreamReader::new(body.map(|f| f.map_err(|e| std::io::Error::other(e.to_string())))));
 
@@ -2552,6 +3148,17 @@ impl S3 for FS {
 
         // Sync metadata to database (non-blocking)
         sync_put_object_metadata(&obj_info, req.credentials.as_ref().map(|c| c.access_key.clone()));
+
+        // Invalidate cache for the written object to prevent stale data
+        let manager = get_concurrency_manager();
+        let put_bucket = bucket.clone();
+        let put_key = key.clone();
+        let put_version = obj_info.version_id.map(|v| v.to_string());
+        tokio::spawn(async move {
+            manager
+                .invalidate_cache_versioned(&put_bucket, &put_key, put_version.as_deref())
+                .await;
+        });
 
         let e_tag = obj_info.etag.clone().map(|etag| to_s3s_etag(&etag));
 
@@ -2860,7 +3467,14 @@ impl S3 for FS {
 
         let mut size = size.ok_or_else(|| s3_error!(UnexpectedContent))?;
 
-        let body = StreamReader::new(body_stream.map(|f| f.map_err(|e| std::io::Error::other(e.to_string()))));
+        // Apply adaptive buffer sizing based on part size for optimal streaming performance.
+        // Uses workload profile configuration (enabled by default) to select appropriate buffer size.
+        // Buffer sizes range from 32KB to 4MB depending on part size and configured workload profile.
+        let buffer_size = get_buffer_size_opt_in(size);
+        let body = tokio::io::BufReader::with_capacity(
+            buffer_size,
+            StreamReader::new(body_stream.map(|f| f.map_err(|e| std::io::Error::other(e.to_string())))),
+        );
 
         // mc cp step 4
 
@@ -3070,7 +3684,12 @@ impl S3 for FS {
         // Validate copy conditions (simplified for now)
         if let Some(if_match) = copy_source_if_match {
             if let Some(ref etag) = src_info.etag {
-                if etag != &if_match {
+                if let Some(strong_etag) = if_match.as_etag() {
+                    if strong_etag.as_strong() != Some(etag.as_str()) {
+                        return Err(s3_error!(PreconditionFailed));
+                    }
+                } else {
+                    // Weak ETag in If-Match should fail
                     return Err(s3_error!(PreconditionFailed));
                 }
             } else {
@@ -3080,9 +3699,12 @@ impl S3 for FS {
 
         if let Some(if_none_match) = copy_source_if_none_match {
             if let Some(ref etag) = src_info.etag {
-                if etag == &if_none_match {
-                    return Err(s3_error!(PreconditionFailed));
+                if let Some(strong_etag) = if_none_match.as_etag() {
+                    if strong_etag.as_strong() == Some(etag.as_str()) {
+                        return Err(s3_error!(PreconditionFailed));
+                    }
                 }
+                // Weak ETag in If-None-Match is ignored (doesn't match)
             }
         }
 
@@ -3340,8 +3962,46 @@ impl S3 for FS {
             bucket,
             key,
             upload_id,
+            if_match,
+            if_none_match,
             ..
         } = input;
+
+        if if_match.is_some() || if_none_match.is_some() {
+            let Some(store) = new_object_layer_fn() else {
+                return Err(S3Error::with_message(S3ErrorCode::InternalError, "Not init".to_string()));
+            };
+
+            match store.get_object_info(&bucket, &key, &ObjectOptions::default()).await {
+                Ok(info) => {
+                    if !info.delete_marker {
+                        if let Some(ifmatch) = if_match {
+                            if let Some(strong_etag) = ifmatch.as_etag() {
+                                if info.etag.as_ref().is_some_and(|etag| strong_etag.as_strong() != Some(etag.as_str())) {
+                                    return Err(s3_error!(PreconditionFailed));
+                                }
+                            }
+                        }
+                        if let Some(ifnonematch) = if_none_match {
+                            if let Some(strong_etag) = ifnonematch.as_etag() {
+                                if info.etag.as_ref().is_some_and(|etag| strong_etag.as_strong() == Some(etag.as_str())) {
+                                    return Err(s3_error!(PreconditionFailed));
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    if !is_err_object_not_found(&err) && !is_err_version_not_found(&err) {
+                        return Err(ApiError::from(err).into());
+                    }
+
+                    if if_match.is_some() && (is_err_object_not_found(&err) || is_err_version_not_found(&err)) {
+                        return Err(ApiError::from(err).into());
+                    }
+                }
+            }
+        }
 
         let Some(multipart_upload) = multipart_upload else { return Err(s3_error!(InvalidPart)) };
 
@@ -3405,6 +4065,17 @@ impl S3 for FS {
             .complete_multipart_upload(&bucket, &key, &upload_id, uploaded_parts, opts)
             .await
             .map_err(ApiError::from)?;
+
+        // Invalidate cache for the completed multipart object
+        let manager = get_concurrency_manager();
+        let mpu_bucket = bucket.clone();
+        let mpu_key = key.clone();
+        let mpu_version = obj_info.version_id.map(|v| v.to_string());
+        tokio::spawn(async move {
+            manager
+                .invalidate_cache_versioned(&mpu_bucket, &mpu_key, mpu_version.as_deref())
+                .await;
+        });
 
         info!(
             "TDD: Creating output with SSE: {:?}, KMS Key: {:?}",
@@ -3584,6 +4255,13 @@ impl S3 for FS {
             tagging,
             ..
         } = req.input.clone();
+
+        if tagging.tag_set.len() > 10 {
+            // TOTO: Note that Amazon S3 limits the maximum number of tags to 10 tags per object.
+            // Reference: https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-tagging.html
+            // Reference: https://docs.aws.amazon.com/zh_cn/AmazonS3/latest/API/API_PutObjectTagging.html
+            // https://github.com/minio/mint/blob/master/run/core/aws-sdk-go-v2/main.go#L1647
+        }
 
         let Some(store) = new_object_layer_fn() else {
             return Err(S3Error::with_message(S3ErrorCode::InternalError, "Not init".to_string()));
@@ -3898,18 +4576,16 @@ impl S3 for FS {
             .map_err(ApiError::from)?;
 
         let rules = match metadata_sys::get_lifecycle_config(&bucket).await {
-            Ok((cfg, _)) => Some(cfg.rules),
+            Ok((cfg, _)) => cfg.rules,
             Err(_err) => {
-                // if BucketMetadataError::BucketLifecycleNotFound.is(&err) {
-                //     return Err(s3_error!(NoSuchLifecycleConfiguration));
-                // }
-                // warn!("get_lifecycle_config err {:?}", err);
-                None
+                // Return NoSuchLifecycleConfiguration error as expected by S3 clients
+                // This fixes issue #990 where Ansible S3 roles fail with KeyError: 'Rules'
+                return Err(s3_error!(NoSuchLifecycleConfiguration));
             }
         };
 
         Ok(S3Response::new(GetBucketLifecycleConfigurationOutput {
-            rules,
+            rules: Some(rules),
             ..Default::default()
         }))
     }
@@ -4296,20 +4972,24 @@ impl S3 for FS {
         let parse_rules = async {
             let mut event_rules = Vec::new();
 
-            process_queue_configurations(
-                &mut event_rules,
-                notification_configuration.queue_configurations.clone(),
-                TargetID::from_str,
-            );
-            process_topic_configurations(
-                &mut event_rules,
-                notification_configuration.topic_configurations.clone(),
-                TargetID::from_str,
-            );
+            process_queue_configurations(&mut event_rules, notification_configuration.queue_configurations.clone(), |arn_str| {
+                ARN::parse(arn_str)
+                    .map(|arn| arn.target_id)
+                    .map_err(|e| TargetIDError::InvalidFormat(e.to_string()))
+            });
+            process_topic_configurations(&mut event_rules, notification_configuration.topic_configurations.clone(), |arn_str| {
+                ARN::parse(arn_str)
+                    .map(|arn| arn.target_id)
+                    .map_err(|e| TargetIDError::InvalidFormat(e.to_string()))
+            });
             process_lambda_configurations(
                 &mut event_rules,
                 notification_configuration.lambda_function_configurations.clone(),
-                TargetID::from_str,
+                |arn_str| {
+                    ARN::parse(arn_str)
+                        .map(|arn| arn.target_id)
+                        .map_err(|e| TargetIDError::InvalidFormat(e.to_string()))
+                },
             );
 
             event_rules
@@ -4901,6 +5581,8 @@ pub(crate) async fn has_replication_rules(bucket: &str, objects: &[ObjectToDelet
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustfs_config::MI_B;
+    use rustfs_ecstore::set_disk::DEFAULT_READ_BUFFER_SIZE;
 
     #[test]
     fn test_fs_creation() {
@@ -4971,6 +5653,204 @@ mod tests {
 
         let gz_format = CompressionFormat::from_extension("gz");
         assert_eq!(gz_format.extension(), "gz");
+    }
+
+    #[test]
+    fn test_adaptive_buffer_size_with_profile() {
+        const KB: i64 = 1024;
+        const MB: i64 = 1024 * 1024;
+
+        // Test GeneralPurpose profile (default behavior, should match get_adaptive_buffer_size)
+        assert_eq!(
+            get_adaptive_buffer_size_with_profile(500 * KB, Some(WorkloadProfile::GeneralPurpose)),
+            64 * KB as usize
+        );
+        assert_eq!(
+            get_adaptive_buffer_size_with_profile(50 * MB, Some(WorkloadProfile::GeneralPurpose)),
+            256 * KB as usize
+        );
+        assert_eq!(
+            get_adaptive_buffer_size_with_profile(200 * MB, Some(WorkloadProfile::GeneralPurpose)),
+            DEFAULT_READ_BUFFER_SIZE
+        );
+
+        // Test AiTraining profile - larger buffers for large files
+        assert_eq!(
+            get_adaptive_buffer_size_with_profile(5 * MB, Some(WorkloadProfile::AiTraining)),
+            512 * KB as usize
+        );
+        assert_eq!(
+            get_adaptive_buffer_size_with_profile(100 * MB, Some(WorkloadProfile::AiTraining)),
+            2 * MB as usize
+        );
+        assert_eq!(
+            get_adaptive_buffer_size_with_profile(600 * MB, Some(WorkloadProfile::AiTraining)),
+            4 * MB as usize
+        );
+
+        // Test WebWorkload profile - smaller buffers for web assets
+        assert_eq!(
+            get_adaptive_buffer_size_with_profile(100 * KB, Some(WorkloadProfile::WebWorkload)),
+            32 * KB as usize
+        );
+        assert_eq!(
+            get_adaptive_buffer_size_with_profile(5 * MB, Some(WorkloadProfile::WebWorkload)),
+            128 * KB as usize
+        );
+        assert_eq!(
+            get_adaptive_buffer_size_with_profile(50 * MB, Some(WorkloadProfile::WebWorkload)),
+            256 * KB as usize
+        );
+
+        // Test SecureStorage profile - memory-constrained buffers
+        assert_eq!(
+            get_adaptive_buffer_size_with_profile(500 * KB, Some(WorkloadProfile::SecureStorage)),
+            32 * KB as usize
+        );
+        assert_eq!(
+            get_adaptive_buffer_size_with_profile(25 * MB, Some(WorkloadProfile::SecureStorage)),
+            128 * KB as usize
+        );
+        assert_eq!(
+            get_adaptive_buffer_size_with_profile(100 * MB, Some(WorkloadProfile::SecureStorage)),
+            256 * KB as usize
+        );
+
+        // Test IndustrialIoT profile - low latency, moderate buffers
+        assert_eq!(
+            get_adaptive_buffer_size_with_profile(512 * KB, Some(WorkloadProfile::IndustrialIoT)),
+            64 * KB as usize
+        );
+        assert_eq!(
+            get_adaptive_buffer_size_with_profile(25 * MB, Some(WorkloadProfile::IndustrialIoT)),
+            256 * KB as usize
+        );
+        assert_eq!(
+            get_adaptive_buffer_size_with_profile(100 * MB, Some(WorkloadProfile::IndustrialIoT)),
+            512 * KB as usize
+        );
+
+        // Test DataAnalytics profile
+        assert_eq!(
+            get_adaptive_buffer_size_with_profile(2 * MB, Some(WorkloadProfile::DataAnalytics)),
+            128 * KB as usize
+        );
+        assert_eq!(
+            get_adaptive_buffer_size_with_profile(100 * MB, Some(WorkloadProfile::DataAnalytics)),
+            512 * KB as usize
+        );
+        assert_eq!(
+            get_adaptive_buffer_size_with_profile(500 * MB, Some(WorkloadProfile::DataAnalytics)),
+            2 * MB as usize
+        );
+
+        // Test with None (should auto-detect or use GeneralPurpose)
+        let result = get_adaptive_buffer_size_with_profile(50 * MB, None);
+        // Should be either SecureStorage (if on special OS) or GeneralPurpose
+        assert!(result == 128 * KB as usize || result == 256 * KB as usize);
+
+        // Test unknown file size with different profiles
+        assert_eq!(
+            get_adaptive_buffer_size_with_profile(-1, Some(WorkloadProfile::AiTraining)),
+            2 * MB as usize
+        );
+        assert_eq!(
+            get_adaptive_buffer_size_with_profile(-1, Some(WorkloadProfile::WebWorkload)),
+            128 * KB as usize
+        );
+        assert_eq!(
+            get_adaptive_buffer_size_with_profile(-1, Some(WorkloadProfile::SecureStorage)),
+            128 * KB as usize
+        );
+    }
+
+    #[test]
+    fn test_phase3_default_behavior() {
+        use crate::config::workload_profiles::{
+            RustFSBufferConfig, WorkloadProfile, init_global_buffer_config, set_buffer_profile_enabled,
+        };
+
+        const KB: i64 = 1024;
+        const MB: i64 = 1024 * 1024;
+
+        // Test Phase 3: Enabled by default with GeneralPurpose profile
+        set_buffer_profile_enabled(true);
+        init_global_buffer_config(RustFSBufferConfig::new(WorkloadProfile::GeneralPurpose));
+
+        // Verify GeneralPurpose profile provides consistent buffer sizes
+        assert_eq!(get_buffer_size_opt_in(500 * KB), 64 * KB as usize);
+        assert_eq!(get_buffer_size_opt_in(50 * MB), 256 * KB as usize);
+        assert_eq!(get_buffer_size_opt_in(200 * MB), MI_B);
+        assert_eq!(get_buffer_size_opt_in(-1), MI_B); // Unknown size
+
+        // Reset for other tests
+        set_buffer_profile_enabled(false);
+    }
+
+    #[test]
+    fn test_buffer_size_opt_in() {
+        use crate::config::workload_profiles::{is_buffer_profile_enabled, set_buffer_profile_enabled};
+
+        const KB: i64 = 1024;
+        const MB: i64 = 1024 * 1024;
+
+        // \[1\] Default state: profile is not enabled, global configuration is not explicitly initialized
+        // get_buffer_size_opt_in should be equivalent to the GeneralPurpose configuration
+        set_buffer_profile_enabled(false);
+        assert!(!is_buffer_profile_enabled());
+
+        // GeneralPurpose rules:
+        // \< 1MB -> 64KB，1MB-100MB -> 256KB，\>=100MB -> 1MB
+        assert_eq!(get_buffer_size_opt_in(500 * KB), 64 * KB as usize);
+        assert_eq!(get_buffer_size_opt_in(50 * MB), 256 * KB as usize);
+        assert_eq!(get_buffer_size_opt_in(200 * MB), MI_B);
+
+        // \[2\] Enable the profile switch, but the global configuration is still the default GeneralPurpose
+        set_buffer_profile_enabled(true);
+        assert!(is_buffer_profile_enabled());
+
+        assert_eq!(get_buffer_size_opt_in(500 * KB), 64 * KB as usize);
+        assert_eq!(get_buffer_size_opt_in(50 * MB), 256 * KB as usize);
+        assert_eq!(get_buffer_size_opt_in(200 * MB), MI_B);
+
+        // \[3\] Close again to ensure unchanged behavior
+        set_buffer_profile_enabled(false);
+        assert!(!is_buffer_profile_enabled());
+        assert_eq!(get_buffer_size_opt_in(500 * KB), 64 * KB as usize);
+    }
+
+    #[test]
+    fn test_phase4_full_integration() {
+        use crate::config::workload_profiles::{
+            RustFSBufferConfig, WorkloadProfile, init_global_buffer_config, set_buffer_profile_enabled,
+        };
+
+        const KB: i64 = 1024;
+        const MB: i64 = 1024 * 1024;
+
+        // \[1\] During the entire test process, the global configuration is initialized only once.
+        // In order not to interfere with other tests, use GeneralPurpose (consistent with the default).
+        // If it has been initialized elsewhere, this call will be ignored by OnceLock and the behavior will still be GeneralPurpose.
+        init_global_buffer_config(RustFSBufferConfig::new(WorkloadProfile::GeneralPurpose));
+
+        // Make sure to turn off profile initially
+        set_buffer_profile_enabled(false);
+
+        // \[2\] Verify behavior of get_buffer_size_opt_in in disabled profile (GeneralPurpose)
+        assert_eq!(get_buffer_size_opt_in(500 * KB), 64 * KB as usize);
+        assert_eq!(get_buffer_size_opt_in(50 * MB), 256 * KB as usize);
+        assert_eq!(get_buffer_size_opt_in(200 * MB), MI_B);
+
+        // \[3\] When profile is enabled, the behavior remains consistent with the global GeneralPurpose configuration
+        set_buffer_profile_enabled(true);
+        assert_eq!(get_buffer_size_opt_in(500 * KB), 64 * KB as usize);
+        assert_eq!(get_buffer_size_opt_in(50 * MB), 256 * KB as usize);
+        assert_eq!(get_buffer_size_opt_in(200 * MB), MI_B);
+
+        // \[4\] Complex scenes, boundary values: such as unknown size
+        assert_eq!(get_buffer_size_opt_in(-1), MI_B);
+
+        set_buffer_profile_enabled(false);
     }
 
     // Note: S3Request structure is complex and requires many fields.
