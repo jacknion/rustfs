@@ -10,6 +10,123 @@ dayjs.locale('zh-cn');
 
 const { createApp, ref, reactive, computed, onMounted } = Vue;
 
+// ========== AWS Signature V4 Implementation ==========
+const AWS_SHA256 = {
+    async hash(message) {
+        const msgBuffer = new TextEncoder().encode(message);
+        const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+        return this.bufferToHex(hashBuffer);
+    },
+    
+    async hmac(key, message) {
+        const keyBuffer = typeof key === 'string' ? new TextEncoder().encode(key) : key;
+        const msgBuffer = new TextEncoder().encode(message);
+        const cryptoKey = await crypto.subtle.importKey(
+            'raw', keyBuffer, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+        );
+        const signature = await crypto.subtle.sign('HMAC', cryptoKey, msgBuffer);
+        return new Uint8Array(signature);
+    },
+    
+    bufferToHex(buffer) {
+        return Array.from(new Uint8Array(buffer))
+            .map(b => b.toString(16).padStart(2, '0'))
+            .join('');
+    }
+};
+
+async function getSigningKey(secretKey, dateStamp, region, service) {
+    const kDate = await AWS_SHA256.hmac('AWS4' + secretKey, dateStamp);
+    const kRegion = await AWS_SHA256.hmac(kDate, region);
+    const kService = await AWS_SHA256.hmac(kRegion, service);
+    const kSigning = await AWS_SHA256.hmac(kService, 'aws4_request');
+    return kSigning;
+}
+
+async function signRequest(method, url, credentials, region = 'us-east-1', service = 's3') {
+    const urlObj = new URL(url);
+    const host = urlObj.host;
+    const path = urlObj.pathname;
+    const queryString = urlObj.search.slice(1);
+    
+    const now = new Date();
+    const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '');
+    const dateStamp = amzDate.slice(0, 8);
+    
+    // Payload hash (empty for GET requests)
+    const payloadHash = await AWS_SHA256.hash('');
+    
+    // Canonical headers (must be sorted alphabetically by header name)
+    const canonicalHeaders = `host:${host}\nx-amz-content-sha256:${payloadHash}\nx-amz-date:${amzDate}\n`;
+    const signedHeaders = 'host;x-amz-content-sha256;x-amz-date';
+    
+    // Canonical request
+    const canonicalRequest = [
+        method,
+        path,
+        queryString,
+        canonicalHeaders,
+        signedHeaders,
+        payloadHash
+    ].join('\n');
+    
+    // String to sign
+    const algorithm = 'AWS4-HMAC-SHA256';
+    const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
+    const canonicalRequestHash = await AWS_SHA256.hash(canonicalRequest);
+    const stringToSign = [
+        algorithm,
+        amzDate,
+        credentialScope,
+        canonicalRequestHash
+    ].join('\n');
+    
+    // Signature
+    const signingKey = await getSigningKey(credentials.SecretAccessKey, dateStamp, region, service);
+    const signatureBuffer = await AWS_SHA256.hmac(signingKey, stringToSign);
+    const signature = AWS_SHA256.bufferToHex(signatureBuffer);
+    
+    // Authorization header
+    const authorizationHeader = `${algorithm} Credential=${credentials.AccessKeyId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
+    
+    const headers = {
+        'Host': host,
+        'X-Amz-Date': amzDate,
+        'X-Amz-Content-Sha256': payloadHash,
+        'Authorization': authorizationHeader
+    };
+    
+    // Add session token if present (for STS credentials)
+    if (credentials.SessionToken) {
+        headers['X-Amz-Security-Token'] = credentials.SessionToken;
+    }
+    
+    return headers;
+}
+
+// Get credentials from Console's localStorage
+function getStoredCredentials() {
+    try {
+        const stored = localStorage.getItem('auth.credentials');
+        if (!stored) return null;
+        
+        const creds = JSON.parse(stored);
+        if (!creds.AccessKeyId || !creds.SecretAccessKey) return null;
+        
+        // Check expiration
+        if (creds.Expiration && new Date(creds.Expiration) < new Date()) {
+            console.warn('Credentials expired');
+            return null;
+        }
+        
+        return creds;
+    } catch (e) {
+        console.error('Failed to parse stored credentials:', e);
+        return null;
+    }
+}
+
+// ========== Vue Application ==========
 const app = createApp({
     setup() {
         // State
@@ -20,6 +137,7 @@ const app = createApp({
         const detailObj = ref(null);
         const toast = ref(null);
         const currentPage = ref(1);
+        const isAuthenticated = ref(false);
 
         // Query parameters
         const query = reactive({
@@ -49,6 +167,21 @@ const app = createApp({
         const getApiBase = () => {
             // Use current origin for API calls
             return window.location.origin;
+        };
+
+        // Redirect to login (store current path for return after login)
+        const redirectToLogin = () => {
+            // Store current URL so Console can redirect back after login
+            localStorage.setItem('redirect-path', window.location.pathname + window.location.search);
+            const loginUrl = window.location.origin + '/rustfs/console/auth/login';
+            window.location.href = loginUrl;
+        };
+
+        // Check authentication
+        const checkAuth = () => {
+            const creds = getStoredCredentials();
+            isAuthenticated.value = !!creds;
+            return creds;
         };
 
         // Check database connection
@@ -111,6 +244,14 @@ const app = createApp({
 
         // Search
         const search = async () => {
+            // Check credentials
+            const creds = checkAuth();
+            if (!creds) {
+                error.value = '未登录，请先登录 Console';
+                showToast('请先登录 Console', 'error');
+                return;
+            }
+            
             loading.value = true;
             error.value = null;
             currentPage.value = 1;
@@ -119,9 +260,24 @@ const app = createApp({
                 const url = buildQueryUrl(0);
                 console.log('Query URL:', url);
                 
-                const response = await fetch(url);
+                // Sign the request
+                const authHeaders = await signRequest('GET', url, creds);
+                
+                const response = await fetch(url, {
+                    method: 'GET',
+                    headers: authHeaders
+                });
                 
                 if (!response.ok) {
+                    if (response.status === 403) {
+                        const text = await response.text();
+                        if (text.includes('ExpiredToken') || text.includes('expired')) {
+                            error.value = '登录已过期，请重新登录';
+                            showToast('登录已过期，请重新登录', 'error');
+                            isAuthenticated.value = false;
+                            return;
+                        }
+                    }
                     const text = await response.text();
                     throw new Error(`查询失败: ${response.status} - ${text}`);
                 }
@@ -142,6 +298,13 @@ const app = createApp({
         const goToPage = async (page) => {
             if (page < 1 || page > totalPages.value) return;
             
+            // Check credentials
+            const creds = checkAuth();
+            if (!creds) {
+                error.value = '未登录，请先登录 Console';
+                return;
+            }
+            
             loading.value = true;
             error.value = null;
             currentPage.value = page;
@@ -150,7 +313,13 @@ const app = createApp({
                 const offset = (page - 1) * query.limit;
                 const url = buildQueryUrl(offset);
                 
-                const response = await fetch(url);
+                // Sign the request
+                const authHeaders = await signRequest('GET', url, creds);
+                
+                const response = await fetch(url, {
+                    method: 'GET',
+                    headers: authHeaders
+                });
                 
                 if (!response.ok) {
                     throw new Error(`查询失败: ${response.status}`);
@@ -285,6 +454,7 @@ const app = createApp({
 
         // Lifecycle
         onMounted(() => {
+            checkAuth();
             checkDbStatus();
         });
 
@@ -302,6 +472,7 @@ const app = createApp({
             newTag,
             useFuzzySearch,
             totalPages,
+            isAuthenticated,
             
             // Methods
             search,
@@ -314,7 +485,8 @@ const app = createApp({
             formatDate,
             exportCSV,
             exportJSON,
-            copyToClipboard
+            copyToClipboard,
+            redirectToLogin
         };
     }
 });

@@ -215,21 +215,33 @@ pub async fn start_http_server(
     let localhost_endpoint = format!("{protocol}://127.0.0.1:{server_port}");
     let now_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     if opt.console_enable {
-        admin::console::init_console_cfg(local_ip, server_port);
+        admin::console::init_console_cfg(local_ip, server_port, opt.public_url.clone());
+
+        // Use public_url if configured, otherwise use auto-detected addresses
+        let console_url = if let Some(ref public_url) = opt.public_url {
+            let url_trimmed = public_url.trim_end_matches('/');
+            format!("{url_trimmed}/rustfs/console/")
+        } else {
+            format!("{protocol}://{local_ip}:{server_port}/rustfs/console/")
+        };
+        let console_localhost_url = format!("{protocol}://127.0.0.1:{server_port}/rustfs/console/");
 
         info!(
             target: "rustfs::console::startup",
-            "Console WebUI available at: {protocol}://{local_ip}:{server_port}/rustfs/console/index.html"
+            "Console WebUI available at: {console_url}"
         );
-        info!(
-            target: "rustfs::console::startup",
-            "Console WebUI (localhost): {protocol}://127.0.0.1:{server_port}/rustfs/console/index.html",
-
-        );
+        if opt.public_url.is_none() {
+            info!(
+                target: "rustfs::console::startup",
+                "Console WebUI (localhost): {console_localhost_url}",
+            );
+        }
 
         println!("Console WebUI Start Time: {now_time}");
-        println!("Console WebUI available at: {protocol}://{local_ip}:{server_port}/rustfs/console/index.html");
-        println!("Console WebUI (localhost): {protocol}://127.0.0.1:{server_port}/rustfs/console/index.html",);
+        println!("Console WebUI available at: {console_url}");
+        if opt.public_url.is_none() {
+            println!("Console WebUI (localhost): {console_localhost_url}");
+        }
     } else {
         info!(target: "rustfs::main::startup","RustFS API: {api_endpoints}  {localhost_endpoint}");
         println!("RustFS API: {api_endpoints}  {localhost_endpoint}");

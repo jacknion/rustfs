@@ -127,18 +127,10 @@ where
             return Ok(());
         }
 
-        // Allow unauthenticated access to database health and metadata query (console internal use)
-        if self.console_enabled && req.method == Method::GET {
-            if path == "/rustfs/admin/v3/database/health"
-                || path.starts_with("/rustfs/admin/v3/s3/metadata/")
-            {
-                return Ok(());
-            }
-        }
-        // Allow POST for query-by-tags endpoint
+        // Allow unauthenticated access to database health endpoint (console internal use)
         if self.console_enabled
-            && req.method == Method::POST
-            && path == "/rustfs/admin/v3/s3/metadata/query-by-tags"
+            && req.method == Method::GET
+            && path == "/rustfs/admin/v3/database/health"
         {
             return Ok(());
         }

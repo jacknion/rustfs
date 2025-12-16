@@ -35,7 +35,6 @@ use crate::storage::database::{
     DatabaseConfig, MetadataSyncConfig, init_database_pool, init_metadata_sync_service, shutdown_database_pool,
     shutdown_metadata_sync_service,
 };
-use crate::storage::ecfs::{process_lambda_configurations, process_queue_configurations, process_topic_configurations};
 use chrono::Datelike;
 use clap::Parser;
 use license::init_license;
@@ -212,14 +211,19 @@ async fn run(opt: config::Opt) -> Result<()> {
     // Update service status to Starting
     state_manager.update(ServiceState::Starting);
 
+    // Determine if console should run on a separate port
+    let console_on_separate_port = opt.console_enable && !opt.console_address.is_empty();
+
     let s3_shutdown_tx = {
         let mut s3_opt = opt.clone();
-        s3_opt.console_enable = false;
+        // If console is on a separate port, disable it for the S3 service
+        // Otherwise, keep console enabled on the same port
+        s3_opt.console_enable = opt.console_enable && !console_on_separate_port;
         let s3_shutdown_tx = start_http_server(&s3_opt, state_manager.clone()).await?;
         Some(s3_shutdown_tx)
     };
 
-    let console_shutdown_tx = if opt.console_enable && !opt.console_address.is_empty() {
+    let console_shutdown_tx = if console_on_separate_port {
         let mut console_opt = opt.clone();
         console_opt.address = console_opt.console_address.clone();
         let console_shutdown_tx = start_http_server(&console_opt, state_manager.clone()).await?;

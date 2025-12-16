@@ -91,6 +91,11 @@ pub struct Opt {
     #[arg(long, env = "RUSTFS_REGION")]
     pub region: Option<String>,
 
+    /// Public URL for reverse proxy deployments (e.g., https://www.example.com:444/rustfs)
+    /// When set, console and API endpoints will use this URL instead of auto-detected addresses.
+    #[arg(long, env = "RUSTFS_PUBLIC_URL")]
+    pub public_url: Option<String>,
+
     /// Enable KMS encryption for server-side encryption
     #[arg(long, default_value_t = false, env = "RUSTFS_KMS_ENABLE")]
     pub kms_enable: bool,

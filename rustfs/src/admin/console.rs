@@ -65,7 +65,22 @@ struct StaticFiles;
 /// - An `impl IntoResponse` containing the static file content or a 404 response.
 ///
 async fn static_handler(uri: Uri) -> impl IntoResponse {
-    let mut path = uri.path().trim_start_matches('/');
+    let path = uri.path();
+    serve_static_file_with_redirect(path, path)
+}
+
+/// Static file handler for nested routes (strips CONSOLE_PREFIX)
+async fn nested_static_handler(uri: Uri) -> impl IntoResponse {
+    let path = uri.path();
+    // When using axum's nest(), the prefix is already stripped from uri.path()
+    // So we need to reconstruct the full path for redirects
+    let full_path = format!("{}{}", CONSOLE_PREFIX, path);
+    serve_static_file_with_redirect(path, &full_path)
+}
+
+/// Core static file serving logic with directory redirect support
+fn serve_static_file_with_redirect(path: &str, original_path: &str) -> Response<Body> {
+    let mut path = path.trim_start_matches('/');
     if path.is_empty() {
         path = "index.html"
     }
@@ -80,7 +95,21 @@ async fn static_handler(uri: Uri) -> impl IntoResponse {
             .unwrap();
     }
     
-    // If path ends with '/' or is a directory, try to get index.html in that directory
+    // If path doesn't end with '/', check if it's a directory and redirect
+    if !path.ends_with('/') {
+        let index_path = format!("{}/index.html", path);
+        if StaticFiles::get(&index_path).is_some() {
+            // It's a directory, redirect to add trailing slash
+            let redirect_path = format!("{}/", original_path);
+            return Response::builder()
+                .status(StatusCode::MOVED_PERMANENTLY)
+                .header("Location", redirect_path)
+                .body(Body::empty())
+                .unwrap();
+        }
+    }
+    
+    // If path ends with '/', try to get index.html in that directory
     let index_path = if path.ends_with('/') {
         format!("{}index.html", path)
     } else {
@@ -124,14 +153,28 @@ pub(crate) struct Config {
 }
 
 impl Config {
-    fn new(local_ip: IpAddr, port: u16, version: &str, date: &str) -> Self {
+    fn new(local_ip: IpAddr, port: u16, version: &str, date: &str, public_url: Option<String>) -> Self {
+        // If public_url is provided, use it as the base for API and S3 endpoints
+        let (base_url, s3_endpoint) = if let Some(ref url) = public_url {
+            // Parse the public URL to extract base components
+            // Expected format: https://www.example.com:444/rustfs or https://www.example.com:444
+            let url_trimmed = url.trim_end_matches('/');
+            (
+                format!("{url_trimmed}{RUSTFS_ADMIN_PREFIX}"),
+                url_trimmed.to_string(),
+            )
+        } else {
+            (
+                format!("http://{local_ip}:{port}{RUSTFS_ADMIN_PREFIX}"),
+                format!("http://{local_ip}:{port}"),
+            )
+        };
+
         Config {
             port,
-            api: Api {
-                base_url: format!("http://{local_ip}:{port}/{RUSTFS_ADMIN_PREFIX}"),
-            },
+            api: Api { base_url },
             s3: S3 {
-                endpoint: format!("http://{local_ip}:{port}"),
+                endpoint: s3_endpoint,
                 region: "cn-east-1".to_owned(),
             },
             release: Release {
@@ -204,8 +247,12 @@ struct License {
 /// Global console configuration
 static CONSOLE_CONFIG: OnceLock<Config> = OnceLock::new();
 
+/// Public URL for reverse proxy deployments
+static PUBLIC_URL: OnceLock<Option<String>> = OnceLock::new();
+
 #[allow(clippy::const_is_empty)]
-pub(crate) fn init_console_cfg(local_ip: IpAddr, port: u16) {
+pub(crate) fn init_console_cfg(local_ip: IpAddr, port: u16, public_url: Option<String>) {
+    PUBLIC_URL.get_or_init(|| public_url.clone());
     CONSOLE_CONFIG.get_or_init(|| {
         let ver = {
             if !build::TAG.is_empty() {
@@ -217,7 +264,7 @@ pub(crate) fn init_console_cfg(local_ip: IpAddr, port: u16) {
             }
         };
 
-        Config::new(local_ip, port, ver.as_str(), build::COMMIT_DATE_3339)
+        Config::new(local_ip, port, ver.as_str(), build::COMMIT_DATE_3339, public_url)
     });
 }
 
@@ -327,9 +374,17 @@ async fn config_handler(uri: Uri, Host(host): Host, headers: HeaderMap) -> impl 
         }
     };
 
-    let url = format!("{}://{}:{}", scheme, host_for_url, cfg.port);
-    cfg.api.base_url = format!("{url}{RUSTFS_ADMIN_PREFIX}");
-    cfg.s3.endpoint = url;
+    // If public_url is configured, use it directly without dynamic adjustment
+    if let Some(Some(public_url)) = PUBLIC_URL.get() {
+        let url_trimmed = public_url.trim_end_matches('/');
+        cfg.api.base_url = format!("{url_trimmed}{RUSTFS_ADMIN_PREFIX}");
+        cfg.s3.endpoint = url_trimmed.to_string();
+    } else {
+        // Dynamic adjustment based on request headers (for non-reverse-proxy scenarios)
+        let url = format!("{}://{}:{}", scheme, host_for_url, cfg.port);
+        cfg.api.base_url = format!("{url}{RUSTFS_ADMIN_PREFIX}");
+        cfg.s3.endpoint = url;
+    }
 
     Response::builder()
         .header("content-type", "application/json")
@@ -503,7 +558,7 @@ fn setup_console_middleware_stack(
         .route(&format!("{CONSOLE_PREFIX}/config.json"), get(config_handler))
         .route(&format!("{CONSOLE_PREFIX}/version"), get(version_handler))
         .route(&format!("{CONSOLE_PREFIX}/health"), get(health_check).head(health_check))
-        .nest(CONSOLE_PREFIX, Router::new().fallback_service(get(static_handler)))
+        .nest(CONSOLE_PREFIX, Router::new().fallback_service(get(nested_static_handler)))
         .fallback_service(get(static_handler));
 
     // Add comprehensive middleware layers using tower-http features

@@ -10,7 +10,8 @@ export RUSTFS_DATABASE_MAX_CONNECTIONS=20
 export RUSTFS_VOLUMES="./data"
 export RUSTFS_ADDRESS="0.0.0.0:9000"
 export RUSTFS_CONSOLE_ENABLE=true
-export RUSTFS_CONSOLE_ADDRESS="0.0.0.0:9001"
+export RUSTFS_CONSOLE_ADDRESS=""  # 留空，Console 与 S3 API 共用 9000 端口
+export RUSTFS_PUBLIC_URL="http://localhost:9000"  # 公开访问地址（不含子路径）
 
 # 日志配置
 export RUSTFS_OBS_LOGGER_LEVEL=info
@@ -19,7 +20,7 @@ export RUSTFS_OBS_LOG_DIRECTORY="./logs"
 echo "🚀 正在启动 RustFS..."
 echo "   数据库: $RUSTFS_DATABASE_URL"
 echo "   S3 接口: http://localhost:9000"
-echo "   控制台: http://localhost:9001"
+echo "   控制台: http://localhost:9000/rustfs/console/index.html"
 echo ""
 
 # 确保数据目录存在

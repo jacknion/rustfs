@@ -30,6 +30,16 @@
                         </div>
                     </div>
                     <div class="flex items-center space-x-4">
+                        <!-- Auth Status -->
+                        <span v-if="isAuthenticated" class="flex items-center text-green-600 text-sm">
+                            <span class="w-2 h-2 bg-green-500 rounded-full mr-2"></span>
+                            已登录
+                        </span>
+                        <button v-else @click="redirectToLogin" class="flex items-center text-orange-600 hover:text-orange-700 text-sm font-medium">
+                            <span class="w-2 h-2 bg-orange-500 rounded-full mr-2"></span>
+                            请先登录
+                        </button>
+                        <!-- DB Status -->
                         <span v-if="dbStatus === 'connected'" class="flex items-center text-green-600 text-sm">
                             <span class="w-2 h-2 bg-green-500 rounded-full mr-2"></span>
                             数据库已连接
