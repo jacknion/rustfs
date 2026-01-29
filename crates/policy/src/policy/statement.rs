@@ -15,6 +15,7 @@
 use super::{
     ActionSet, Args, BucketPolicyArgs, Effect, Error as IamError, Functions, ID, Principal, ResourceSet, Validator,
     action::Action,
+    variables::{VariableContext, VariableResolver},
 };
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -68,7 +69,24 @@ impl Statement {
         false
     }
 
-    pub fn is_allowed(&self, args: &Args) -> bool {
+    pub async fn is_allowed(&self, args: &Args<'_>) -> bool {
+        let mut context = VariableContext::new();
+        context.claims = Some(args.claims.clone());
+        context.conditions = args.conditions.clone();
+        context.account_id = Some(args.account.to_string());
+
+        let username = if let Some(parent) = args.claims.get("parent").and_then(|v| v.as_str()) {
+            // For temp credentials or service account credentials, username is parent_user
+            parent.to_string()
+        } else {
+            // For regular user credentials, username is access_key
+            args.account.to_string()
+        };
+
+        context.username = Some(username);
+
+        let resolver = VariableResolver::new(context);
+
         let check = 'c: {
             if (!self.actions.is_match(&args.action) && !self.actions.is_empty()) || self.not_actions.is_match(&args.action) {
                 break 'c false;
@@ -86,14 +104,36 @@ impl Statement {
             }
 
             if self.is_kms() && (resource == "/" || self.resources.is_empty()) {
-                break 'c self.conditions.evaluate(args.conditions);
+                break 'c self.conditions.evaluate_with_resolver(args.conditions, Some(&resolver)).await;
             }
 
-            if !self.resources.is_match(&resource, args.conditions) && !self.is_admin() && !self.is_sts() {
+            if self.resources.is_empty() && self.not_resources.is_empty() && !self.is_admin() && !self.is_sts() {
                 break 'c false;
             }
 
-            self.conditions.evaluate(args.conditions)
+            if !self.resources.is_empty()
+                && !self
+                    .resources
+                    .is_match_with_resolver(&resource, args.conditions, Some(&resolver))
+                    .await
+                && !self.is_admin()
+                && !self.is_sts()
+            {
+                break 'c false;
+            }
+
+            if !self.not_resources.is_empty()
+                && self
+                    .not_resources
+                    .is_match_with_resolver(&resource, args.conditions, Some(&resolver))
+                    .await
+                && !self.is_admin()
+                && !self.is_sts()
+            {
+                break 'c false;
+            }
+
+            self.conditions.evaluate_with_resolver(args.conditions, Some(&resolver)).await
         };
 
         self.effect.is_allowed(check)
@@ -111,13 +151,19 @@ impl Validator for Statement {
             return Err(IamError::NonAction.into());
         }
 
-        if self.resources.is_empty() {
+        // policy must contain either Resource or NotResource (but not both), and cannot have both empty.
+        if self.resources.is_empty() && self.not_resources.is_empty() {
             return Err(IamError::NonResource.into());
+        }
+
+        if !self.resources.is_empty() && !self.not_resources.is_empty() {
+            return Err(IamError::BothResourceAndNotResource.into());
         }
 
         self.actions.is_valid()?;
         self.not_actions.is_valid()?;
         self.resources.is_valid()?;
+        self.not_resources.is_valid()?;
 
         Ok(())
     }
@@ -133,10 +179,12 @@ impl PartialEq for Statement {
     }
 }
 
+/// Bucket Policy Statement with AWS S3-compatible JSON serialization.
+/// Empty optional fields are omitted from output to match AWS format.
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 #[serde(rename_all = "PascalCase", default)]
 pub struct BPStatement {
-    #[serde(rename = "Sid", default)]
+    #[serde(rename = "Sid", default, skip_serializing_if = "ID::is_empty")]
     pub sid: ID,
     #[serde(rename = "Effect")]
     pub effect: Effect,
@@ -144,18 +192,18 @@ pub struct BPStatement {
     pub principal: Principal,
     #[serde(rename = "Action")]
     pub actions: ActionSet,
-    #[serde(rename = "NotAction", default)]
+    #[serde(rename = "NotAction", default, skip_serializing_if = "ActionSet::is_empty")]
     pub not_actions: ActionSet,
     #[serde(rename = "Resource", default)]
     pub resources: ResourceSet,
-    #[serde(rename = "NotResource", default)]
+    #[serde(rename = "NotResource", default, skip_serializing_if = "ResourceSet::is_empty")]
     pub not_resources: ResourceSet,
-    #[serde(rename = "Condition", default)]
+    #[serde(rename = "Condition", default, skip_serializing_if = "Functions::is_empty")]
     pub conditions: Functions,
 }
 
 impl BPStatement {
-    pub fn is_allowed(&self, args: &BucketPolicyArgs) -> bool {
+    pub async fn is_allowed(&self, args: &BucketPolicyArgs<'_>) -> bool {
         let check = 'c: {
             if !self.principal.is_match(args.account) {
                 break 'c false;
@@ -176,15 +224,15 @@ impl BPStatement {
                 resource.push('/');
             }
 
-            if !self.resources.is_empty() && !self.resources.is_match(&resource, args.conditions) {
+            if !self.resources.is_empty() && !self.resources.is_match(&resource, args.conditions).await {
                 break 'c false;
             }
 
-            if !self.not_resources.is_empty() && self.not_resources.is_match(&resource, args.conditions) {
+            if !self.not_resources.is_empty() && self.not_resources.is_match(&resource, args.conditions).await {
                 break 'c false;
             }
 
-            self.conditions.evaluate(args.conditions)
+            self.conditions.evaluate(args.conditions).await
         };
 
         self.effect.is_allowed(check)
@@ -204,13 +252,18 @@ impl Validator for BPStatement {
             return Err(IamError::NonAction.into());
         }
 
-        if self.resources.is_empty() {
+        if self.resources.is_empty() && self.not_resources.is_empty() {
             return Err(IamError::NonResource.into());
+        }
+
+        if !self.resources.is_empty() && !self.not_resources.is_empty() {
+            return Err(IamError::BothResourceAndNotResource.into());
         }
 
         self.actions.is_valid()?;
         self.not_actions.is_valid()?;
         self.resources.is_valid()?;
+        self.not_resources.is_valid()?;
 
         Ok(())
     }

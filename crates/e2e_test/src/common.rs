@@ -34,8 +34,8 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 // Common constants for all E2E tests
-pub const DEFAULT_ACCESS_KEY: &str = "minioadmin";
-pub const DEFAULT_SECRET_KEY: &str = "minioadmin";
+pub const DEFAULT_ACCESS_KEY: &str = "rustfsadmin";
+pub const DEFAULT_SECRET_KEY: &str = "rustfsadmin";
 pub const TEST_BUCKET: &str = "e2e-test-bucket";
 pub fn workspace_root() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -165,7 +165,7 @@ impl RustFSTestEnvironment {
     }
 
     /// Find an available port for the test
-    async fn find_available_port() -> Result<u16, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn find_available_port() -> Result<u16, Box<dyn std::error::Error + Send + Sync>> {
         use std::net::TcpListener;
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
@@ -176,13 +176,15 @@ impl RustFSTestEnvironment {
     /// Kill any existing RustFS processes
     pub async fn cleanup_existing_processes(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!("Cleaning up any existing RustFS processes");
-        let output = Command::new("pkill").args(["-f", "rustfs"]).output();
+        let binary_path = rustfs_binary_path();
+        let binary_name = binary_path.to_string_lossy();
+        let output = Command::new("pkill").args(["-f", &binary_name]).output();
 
-        if let Ok(output) = output {
-            if output.status.success() {
-                info!("Killed existing RustFS processes");
-                sleep(Duration::from_millis(1000)).await;
-            }
+        if let Ok(output) = output
+            && output.status.success()
+        {
+            info!("Killed existing RustFS processes: {}", binary_name);
+            sleep(Duration::from_millis(1000)).await;
         }
         Ok(())
     }
@@ -327,7 +329,8 @@ pub async fn execute_awscurl(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("awscurl failed: {stderr}").into());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(format!("awscurl failed: stderr='{stderr}', stdout='{stdout}'").into());
     }
 
     let response = String::from_utf8_lossy(&output.stdout).to_string();
@@ -351,4 +354,23 @@ pub async fn awscurl_get(
     secret_key: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     execute_awscurl(url, "GET", None, access_key, secret_key).await
+}
+
+/// Helper function for PUT requests
+pub async fn awscurl_put(
+    url: &str,
+    body: &str,
+    access_key: &str,
+    secret_key: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    execute_awscurl(url, "PUT", Some(body), access_key, secret_key).await
+}
+
+/// Helper function for DELETE requests
+pub async fn awscurl_delete(
+    url: &str,
+    access_key: &str,
+    secret_key: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    execute_awscurl(url, "DELETE", None, access_key, secret_key).await
 }

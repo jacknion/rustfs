@@ -13,9 +13,13 @@
 // limitations under the License.
 
 use crate::error::{Error, Result};
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{self, Error as DeError, Visitor},
+};
 use std::{
     collections::{HashMap, HashSet},
+    fmt,
     hash::Hash,
     ops::Deref,
 };
@@ -24,15 +28,30 @@ use super::{
     Error as IamError, Validator,
     function::key_name::KeyName,
     utils::{path, wildcard},
+    variables::PolicyVariableResolver,
 };
 
-#[derive(Serialize, Deserialize, Clone, Default, Debug)]
+#[derive(Serialize, Clone, Default, Debug)]
 pub struct ResourceSet(pub HashSet<Resource>);
 
 impl ResourceSet {
-    pub fn is_match(&self, resource: &str, conditions: &HashMap<String, Vec<String>>) -> bool {
+    /// Returns true if the resource set is empty.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub async fn is_match(&self, resource: &str, conditions: &HashMap<String, Vec<String>>) -> bool {
+        self.is_match_with_resolver(resource, conditions, None).await
+    }
+
+    pub async fn is_match_with_resolver(
+        &self,
+        resource: &str,
+        conditions: &HashMap<String, Vec<String>>,
+        resolver: Option<&dyn PolicyVariableResolver>,
+    ) -> bool {
         for re in self.0.iter() {
-            if re.is_match(resource, conditions) {
+            if re.is_match_with_resolver(resource, conditions, resolver).await {
                 return true;
             }
         }
@@ -40,9 +59,9 @@ impl ResourceSet {
         false
     }
 
-    pub fn match_resource(&self, resource: &str) -> bool {
+    pub async fn match_resource(&self, resource: &str) -> bool {
         for re in self.0.iter() {
-            if re.match_resource(resource) {
+            if re.match_resource(resource).await {
                 return true;
             }
         }
@@ -76,6 +95,54 @@ impl PartialEq for ResourceSet {
     }
 }
 
+impl<'de> Deserialize<'de> for ResourceSet {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ResourceOrVecVisitor;
+
+        impl<'de> Visitor<'de> for ResourceOrVecVisitor {
+            type Value = ResourceSet;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a string or an array of strings")
+            }
+
+            fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                let resource = Resource::try_from(value).map_err(|e| E::custom(format!("invalid resource: {}", e)))?;
+                let mut set = HashSet::new();
+                set.insert(resource);
+                Ok(ResourceSet(set))
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: de::SeqAccess<'de>,
+                A::Error: DeError,
+            {
+                let mut set = HashSet::with_capacity(seq.size_hint().unwrap_or(0));
+                while let Some(value) = seq.next_element::<String>()? {
+                    match Resource::try_from(value.as_str()) {
+                        Ok(resource) => {
+                            set.insert(resource);
+                        }
+                        Err(e) => {
+                            return Err(A::Error::custom(format!("invalid resource: {}", e)));
+                        }
+                    }
+                }
+                Ok(ResourceSet(set))
+            }
+        }
+
+        deserializer.deserialize_any(ResourceOrVecVisitor)
+    }
+}
+
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]
 pub enum Resource {
     S3(String),
@@ -85,31 +152,56 @@ pub enum Resource {
 impl Resource {
     pub const S3_PREFIX: &'static str = "arn:aws:s3:::";
 
-    pub fn is_match(&self, resource: &str, conditions: &HashMap<String, Vec<String>>) -> bool {
-        let mut pattern = match self {
+    pub async fn is_match(&self, resource: &str, conditions: &HashMap<String, Vec<String>>) -> bool {
+        self.is_match_with_resolver(resource, conditions, None).await
+    }
+
+    pub async fn is_match_with_resolver(
+        &self,
+        resource: &str,
+        conditions: &HashMap<String, Vec<String>>,
+        resolver: Option<&dyn PolicyVariableResolver>,
+    ) -> bool {
+        let pattern = match self {
             Resource::S3(s) => s.to_owned(),
             Resource::Kms(s) => s.to_owned(),
         };
-        if !conditions.is_empty() {
-            for key in KeyName::COMMON_KEYS {
-                if let Some(rvalue) = conditions.get(key.name()) {
-                    if matches!(rvalue.first().map(|c| !c.is_empty()), Some(true)) {
-                        pattern = pattern.replace(&key.var_name(), &rvalue[0]);
+
+        let patterns = if let Some(res) = resolver {
+            super::variables::resolve_aws_variables(&pattern, res).await
+        } else {
+            vec![pattern.clone()]
+        };
+
+        for pattern in patterns {
+            let mut resolved_pattern = pattern;
+
+            // Apply condition substitutions
+            if !conditions.is_empty() {
+                for key in KeyName::COMMON_KEYS {
+                    if let Some(rvalue) = conditions.get(key.name())
+                        && matches!(rvalue.first().map(|c| !c.is_empty()), Some(true))
+                    {
+                        resolved_pattern = resolved_pattern.replace(&key.var_name(), &rvalue[0]);
                     }
                 }
             }
+
+            let cp = path::clean(resource);
+            if cp != "." && cp == resolved_pattern.as_str() {
+                return true;
+            }
+
+            if wildcard::is_match(resolved_pattern, resource) {
+                return true;
+            }
         }
 
-        let cp = path::clean(resource);
-        if cp != "." && cp == pattern.as_str() {
-            return true;
-        }
-
-        wildcard::is_match(pattern, resource)
+        false
     }
 
-    pub fn match_resource(&self, resource: &str) -> bool {
-        self.is_match(resource, &HashMap::new())
+    pub async fn match_resource(&self, resource: &str) -> bool {
+        self.is_match(resource, &HashMap::new()).await
     }
 }
 
@@ -197,6 +289,7 @@ mod tests {
     #[test_case("arn:aws:s3:::mybucket","mybucket/myobject" => false; "15")]
     fn test_resource_is_match(resource: &str, object: &str) -> bool {
         let resource: Resource = resource.try_into().unwrap();
-        resource.is_match(object, &HashMap::new())
+
+        pollster::block_on(resource.is_match(object, &HashMap::new()))
     }
 }

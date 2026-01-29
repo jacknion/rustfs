@@ -12,10 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::admin::ADMIN_PREFIX;
 use crate::admin::console::is_console_path;
 use crate::admin::console::make_console_server;
-use crate::admin::rpc::RPC_PREFIX;
+use crate::server::{ADMIN_PREFIX, HEALTH_PREFIX, PROFILE_CPU_PATH, PROFILE_MEMORY_PATH, RPC_PREFIX};
 use hyper::HeaderMap;
 use hyper::Method;
 use hyper::StatusCode;
@@ -85,23 +84,28 @@ where
 {
     fn is_match(&self, method: &Method, uri: &Uri, headers: &HeaderMap, _: &mut Extensions) -> bool {
         let path = uri.path();
+
         // Profiling endpoints
-        if method == Method::GET && (path == "/profile/cpu" || path == "/profile/memory") {
+        if method == Method::GET && (path == PROFILE_CPU_PATH || path == PROFILE_MEMORY_PATH) {
             return true;
         }
 
         // Health check
-        if (method == Method::HEAD || method == Method::GET) && path == "/health" {
+        if (method == Method::HEAD || method == Method::GET) && path == HEALTH_PREFIX {
             return true;
         }
 
         // AssumeRole
-        if method == Method::POST && path == "/" {
-            if let Some(val) = headers.get(header::CONTENT_TYPE) {
-                if val.as_bytes() == b"application/x-www-form-urlencoded" {
-                    return true;
-                }
-            }
+        if method == Method::POST
+            && path == "/"
+            && headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(|ct| ct.split(';').next().unwrap_or("").trim().to_lowercase())
+                .map(|ct| ct == "application/x-www-form-urlencoded")
+                .unwrap_or(false)
+        {
+            return true;
         }
 
         path.starts_with(ADMIN_PREFIX) || path.starts_with(RPC_PREFIX) || is_console_path(path)
@@ -113,12 +117,12 @@ where
         let path = req.uri.path();
 
         // Profiling endpoints
-        if req.method == Method::GET && (path == "/profile/cpu" || path == "/profile/memory") {
+        if req.method == Method::GET && (path == PROFILE_CPU_PATH || path == PROFILE_MEMORY_PATH) {
             return Ok(());
         }
 
         // Health check
-        if (req.method == Method::HEAD || req.method == Method::GET) && path == "/health" {
+        if (req.method == Method::HEAD || req.method == Method::GET) && path == HEALTH_PREFIX {
             return Ok(());
         }
 
@@ -155,6 +159,8 @@ where
     }
 
     async fn call(&self, req: S3Request<Body>) -> S3Result<S3Response<Body>> {
+        // Console requests should be handled by console router first (including OPTIONS)
+        // Console has its own CORS layer configured
         if self.console_enabled && is_console_path(req.uri.path()) {
             if let Some(console_router) = &self.console_router {
                 let mut console_router = console_router.clone();
@@ -169,11 +175,14 @@ where
         }
 
         let uri = format!("{}|{}", &req.method, req.uri.path());
+
         if let Ok(mat) = self.router.at(&uri) {
             let op: &T = mat.value;
             let mut resp = op.call(req, mat.params).await?;
             resp.status = Some(resp.output.0);
-            return Ok(resp.map_output(|x| x.1));
+            let response = resp.map_output(|x| x.1);
+
+            return Ok(response);
         }
 
         Err(s3_error!(NotImplemented))

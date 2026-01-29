@@ -19,6 +19,8 @@ pub use constants::app::*;
 #[cfg(feature = "constants")]
 pub use constants::body_limits::*;
 #[cfg(feature = "constants")]
+pub use constants::compress::*;
+#[cfg(feature = "constants")]
 pub use constants::console::*;
 #[cfg(feature = "constants")]
 pub use constants::env::*;
@@ -29,7 +31,13 @@ pub use constants::object::*;
 #[cfg(feature = "constants")]
 pub use constants::profiler::*;
 #[cfg(feature = "constants")]
+pub use constants::protocols::*;
+#[cfg(feature = "constants")]
+pub use constants::quota::*;
+#[cfg(feature = "constants")]
 pub use constants::runtime::*;
+#[cfg(feature = "constants")]
+pub use constants::scanner::*;
 #[cfg(feature = "constants")]
 pub use constants::targets::*;
 #[cfg(feature = "constants")]
