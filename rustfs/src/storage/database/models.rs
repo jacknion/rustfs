@@ -258,6 +258,7 @@ mod tests {
             encryption: None,
             owner_id: Some("user-456".to_string()),
             tags: Some(tags),
+            tags_fuzzy: None,
             min_size: Some(1000),
             max_size: Some(10000),
             modified_after: None,

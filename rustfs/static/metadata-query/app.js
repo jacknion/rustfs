@@ -13,12 +13,23 @@ const { createApp, ref, reactive, computed, onMounted } = Vue;
 // ========== AWS Signature V4 Implementation ==========
 const AWS_SHA256 = {
     async hash(message) {
+        // Fallback to CryptoJS if crypto.subtle is not available (e.g. non-secure context)
+        if (typeof CryptoJS !== 'undefined') {
+            return CryptoJS.SHA256(message).toString(CryptoJS.enc.Hex);
+        }
+        
         const msgBuffer = new TextEncoder().encode(message);
         const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
         return this.bufferToHex(hashBuffer);
     },
     
     async hmac(key, message) {
+        // Fallback to CryptoJS if crypto.subtle is not available
+        if (typeof CryptoJS !== 'undefined') {
+            // key can be string or WordArray
+            return CryptoJS.HmacSHA256(message, key);
+        }
+
         const keyBuffer = typeof key === 'string' ? new TextEncoder().encode(key) : key;
         const msgBuffer = new TextEncoder().encode(message);
         const cryptoKey = await crypto.subtle.importKey(
@@ -29,6 +40,9 @@ const AWS_SHA256 = {
     },
     
     bufferToHex(buffer) {
+        if (typeof CryptoJS !== 'undefined') {
+            return buffer.toString(CryptoJS.enc.Hex);
+        }
         return Array.from(new Uint8Array(buffer))
             .map(b => b.toString(16).padStart(2, '0'))
             .join('');
