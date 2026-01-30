@@ -20,8 +20,10 @@ use std::{
     path::Path,
     time::SystemTime,
 };
+use chrono::{DateTime, Utc};
 
 #[derive(Clone, Copy, Default, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct TierStats {
     pub total_size: u64,
     pub num_versions: i32,
@@ -78,6 +80,7 @@ impl AllTierStats {
 
 /// Bucket target usage info provides replication statistics
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BucketTargetUsageInfo {
     pub replication_pending_size: u64,
     pub replication_failed_size: u64,
@@ -90,6 +93,7 @@ pub struct BucketTargetUsageInfo {
 
 /// Bucket usage info provides bucket-level statistics
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BucketUsageInfo {
     pub size: u64,
     // Following five fields suffixed with V1 are here for backward compatibility
@@ -105,58 +109,86 @@ pub struct BucketUsageInfo {
     pub replication_failed_count_v1: u64,
 
     pub objects_count: u64,
+    #[serde(rename = "objectsSizesHistogram", alias = "object_size_histogram")]
     pub object_size_histogram: HashMap<String, u64>,
+    #[serde(rename = "objectsVersionsHistogram", alias = "object_versions_histogram")]
     pub object_versions_histogram: HashMap<String, u64>,
     pub versions_count: u64,
     pub delete_markers_count: u64,
     pub replica_size: u64,
     pub replica_count: u64,
     pub replication_info: HashMap<String, BucketTargetUsageInfo>,
+
+    #[serde(default)]
+    pub replicated_size: u64,
+    #[serde(default)]
+    pub replicated_size_pending: u64,
+    #[serde(default)]
+    pub replicated_size_failed: u64,
+    #[serde(default)]
+    pub tier_stats: HashMap<String, TierStats>,
 }
 
 /// DataUsageInfo represents data usage stats of the underlying storage
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DataUsageInfo {
     /// Total capacity
+    #[serde(alias = "total_capacity")]
     pub total_capacity: u64,
     /// Total used capacity
+    #[serde(alias = "total_used_capacity")]
     pub total_used_capacity: u64,
     /// Total free capacity
+    #[serde(alias = "total_free_capacity")]
     pub total_free_capacity: u64,
 
     /// LastUpdate is the timestamp of when the data usage info was last updated
-    pub last_update: Option<SystemTime>,
+    #[serde(alias = "last_update")]
+    pub last_update: Option<String>,
 
     /// Objects total count across all buckets
+    #[serde(rename = "objectsCount", alias = "objects_total_count")]
     pub objects_total_count: u64,
     /// Versions total count across all buckets
+    #[serde(rename = "versionsCount", alias = "versions_total_count")]
     pub versions_total_count: u64,
     /// Delete markers total count across all buckets
+    #[serde(rename = "deleteMarkersCount", alias = "delete_markers_total_count")]
     pub delete_markers_total_count: u64,
     /// Objects total size across all buckets
+    #[serde(rename = "objectsTotalSize", alias = "objects_total_size")]
     pub objects_total_size: u64,
     /// Replication info across all buckets
+    #[serde(rename = "objectsReplicationInfo", alias = "replication_info")]
     pub replication_info: HashMap<String, BucketTargetUsageInfo>,
 
     /// Total number of buckets in this cluster
+    #[serde(rename = "bucketsCount", alias = "buckets_count")]
     pub buckets_count: u64,
     /// Buckets usage info provides following information across all buckets
+    #[serde(rename = "bucketsUsageInfo", alias = "buckets_usage")]
     pub buckets_usage: HashMap<String, BucketUsageInfo>,
     /// Deprecated kept here for backward compatibility reasons
+    #[serde(rename = "bucketsSizes", alias = "bucket_sizes")]
     pub bucket_sizes: HashMap<String, u64>,
     /// Per-disk snapshot information when available
-    #[serde(default)]
+    #[serde(default, alias = "disk_usage_status")]
     pub disk_usage_status: Vec<DiskUsageStatus>,
+    /// Tier statistics
+    #[serde(default)]
+    pub tier_stats: HashMap<String, TierStats>,
 }
 
 /// Metadata describing the status of a disk-level data usage snapshot.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DiskUsageStatus {
     pub disk_id: String,
     pub pool_index: Option<usize>,
     pub set_index: Option<usize>,
     pub disk_index: Option<usize>,
-    pub last_update: Option<SystemTime>,
+    pub last_update: Option<String>,
     pub snapshot_exists: bool,
 }
 
@@ -494,7 +526,7 @@ impl DataUsageEntry {
 pub struct DataUsageCacheInfo {
     pub name: String,
     pub next_cycle: u32,
-    pub last_update: Option<SystemTime>,
+    pub last_update: Option<String>,
     pub skip_healing: bool,
 }
 
@@ -734,7 +766,7 @@ impl DataUsageCache {
             return;
         }
         if o.info.last_update.gt(&self.info.last_update) {
-            self.info.last_update = o.info.last_update;
+            self.info.last_update = o.info.last_update.clone();
         }
 
         existing_root.as_mut().unwrap().merge(other_root.as_ref().unwrap());
@@ -805,7 +837,7 @@ impl DataUsageCache {
         }
 
         DataUsageInfo {
-            last_update: self.info.last_update,
+            last_update: self.info.last_update.clone(),
             objects_total_count: flat.objects as u64,
             versions_total_count: flat.versions as u64,
             delete_markers_total_count: flat.delete_markers as u64,
@@ -1091,14 +1123,14 @@ impl DataUsageInfo {
         self.total_capacity = total;
         self.total_used_capacity = used;
         self.total_free_capacity = free;
-        self.last_update = Some(SystemTime::now());
+        self.last_update = Some(DateTime::<Utc>::from(SystemTime::now()).to_rfc3339());
     }
 
     /// Add bucket usage info
     pub fn add_bucket_usage(&mut self, bucket: String, usage: BucketUsageInfo) {
         self.buckets_usage.insert(bucket.clone(), usage);
         self.buckets_count = self.buckets_usage.len() as u64;
-        self.last_update = Some(SystemTime::now());
+        self.last_update = Some(DateTime::<Utc>::from(SystemTime::now()).to_rfc3339());
     }
 
     /// Get bucket usage info
@@ -1141,10 +1173,13 @@ impl DataUsageInfo {
         self.buckets_count = self.buckets_usage.len() as u64;
 
         // Update last update time
-        if let Some(other_update) = other.last_update
-            && (self.last_update.is_none() || other_update > self.last_update.unwrap())
-        {
-            self.last_update = Some(other_update);
+        if let Some(other_update_str) = &other.last_update {
+            let other_update = DateTime::parse_from_rfc3339(other_update_str).ok();
+            let current_update = self.last_update.as_ref().and_then(|s| DateTime::parse_from_rfc3339(s).ok());
+            
+            if current_update.is_none() || (other_update.is_some() && other_update > current_update) {
+                self.last_update = Some(other_update_str.clone());
+            }
         }
     }
 }

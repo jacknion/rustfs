@@ -15,8 +15,8 @@
 pub mod local_snapshot;
 
 use crate::{
-    bucket::metadata_sys::get_replication_config, config::com::read_config, disk::DiskAPI, error::Error, store::ECStore,
-    store_api::StorageAPI,
+    bucket::metadata_sys::get_replication_config, config::com::read_config, config::storageclass, disk::DiskAPI,
+    error::Error, store::ECStore, store_api::StorageAPI,
 };
 pub use local_snapshot::{
     DATA_USAGE_DIR, DATA_USAGE_STATE_DIR, LOCAL_USAGE_SNAPSHOT_VERSION, LocalUsageSnapshot, LocalUsageSnapshotMeta,
@@ -25,6 +25,7 @@ pub use local_snapshot::{
 };
 use rustfs_common::data_usage::{
     BucketTargetUsageInfo, BucketUsageInfo, DataUsageCache, DataUsageEntry, DataUsageInfo, DiskUsageStatus, SizeSummary,
+    TierStats,
 };
 use rustfs_utils::path::SLASH_SEPARATOR;
 use std::{
@@ -32,6 +33,7 @@ use std::{
     sync::{Arc, OnceLock},
     time::{Duration, SystemTime},
 };
+use chrono::{DateTime, Utc};
 use tokio::fs;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
@@ -55,6 +57,11 @@ fn memory_cache() -> &'static UsageMemoryCache {
 
 fn cache_updating() -> &'static CacheUpdating {
     USAGE_CACHE_UPDATING.get_or_init(|| Arc::new(RwLock::new(false)))
+}
+
+fn format_system_time(st: SystemTime) -> String {
+    let dt: DateTime<Utc> = st.into();
+    dt.to_rfc3339()
 }
 
 // Data usage storage paths
@@ -81,7 +88,8 @@ pub async fn store_data_usage_in_backend(data_usage_info: DataUsageInfo, store: 
     // Prevent older data from overwriting newer persisted stats
     if let Ok(buf) = read_config(store.clone(), &DATA_USAGE_OBJ_NAME_PATH).await
         && let Ok(existing) = serde_json::from_slice::<DataUsageInfo>(&buf)
-        && let (Some(new_ts), Some(existing_ts)) = (data_usage_info.last_update, existing.last_update)
+        && let (Some(new_ts_str), Some(existing_ts_str)) = (&data_usage_info.last_update, &existing.last_update)
+        && let (Ok(new_ts), Ok(existing_ts)) = (DateTime::parse_from_rfc3339(new_ts_str), DateTime::parse_from_rfc3339(existing_ts_str))
         && new_ts <= existing_ts
     {
         info!(
@@ -159,8 +167,24 @@ pub async fn load_data_usage_from_backend(store: Arc<ECStore>) -> Result<DataUsa
             .collect();
     }
 
-    // Handle replication info
-    for (bucket, bui) in &data_usage_info.buckets_usage {
+    // Aggregate tier_stats if missing at root but present in buckets
+    if data_usage_info.tier_stats.is_empty() {
+        for bui in data_usage_info.buckets_usage.values() {
+            for (tier, stats) in &bui.tier_stats {
+                let aggregated_stats = data_usage_info.tier_stats.entry(tier.clone()).or_default();
+                aggregated_stats.total_size = aggregated_stats.total_size.saturating_add(stats.total_size);
+                aggregated_stats.num_versions = aggregated_stats.num_versions.saturating_add(stats.num_versions);
+                aggregated_stats.num_objects = aggregated_stats.num_objects.saturating_add(stats.num_objects);
+            }
+        }
+    }
+
+    // Handle replication info and populate new fields
+    for (bucket, bui) in &mut data_usage_info.buckets_usage {
+        bui.replicated_size = bui.replicated_size_v1;
+        bui.replicated_size_pending = bui.replication_pending_size_v1;
+        bui.replicated_size_failed = bui.replication_failed_size_v1;
+
         if (bui.replicated_size_v1 > 0
             || bui.replication_failed_count_v1 > 0
             || bui.replication_failed_size_v1 > 0
@@ -209,6 +233,13 @@ fn merge_snapshot(aggregated: &mut DataUsageInfo, mut snapshot: LocalUsageSnapsh
             Entry::Vacant(entry) => {
                 entry.insert(usage.clone());
             }
+        }
+
+        for (tier, stats) in &usage.tier_stats {
+            let aggregated_stats = aggregated.tier_stats.entry(tier.clone()).or_default();
+            aggregated_stats.total_size = aggregated_stats.total_size.saturating_add(stats.total_size);
+            aggregated_stats.num_versions = aggregated_stats.num_versions.saturating_add(stats.num_versions);
+            aggregated_stats.num_objects = aggregated_stats.num_objects.saturating_add(stats.num_objects);
         }
 
         aggregated
@@ -273,7 +304,7 @@ pub async fn aggregate_local_snapshots(store: Arc<ECStore>) -> Result<(Vec<DiskU
                 }
 
                 if let Ok(Some(mut snapshot)) = snapshot_result {
-                    status.last_update = snapshot.last_update;
+                    status.last_update = snapshot.last_update.map(format_system_time);
                     status.snapshot_exists = true;
 
                     if snapshot.meta.disk_id.is_empty() {
@@ -298,7 +329,7 @@ pub async fn aggregate_local_snapshots(store: Arc<ECStore>) -> Result<(Vec<DiskU
     }
 
     aggregated.buckets_count = aggregated.buckets_usage.len() as u64;
-    aggregated.last_update = latest_update;
+    aggregated.last_update = latest_update.map(format_system_time);
     aggregated.disk_usage_status = statuses.clone();
 
     Ok((statuses, aggregated))
@@ -311,6 +342,7 @@ pub async fn compute_bucket_usage(store: Arc<ECStore>, bucket_name: &str) -> Res
     let mut versions_count: u64 = 0;
     let mut total_size: u64 = 0;
     let mut delete_markers: u64 = 0;
+    let mut tier_stats: HashMap<String, TierStats> = HashMap::new();
 
     loop {
         let result = store
@@ -347,6 +379,13 @@ pub async fn compute_bucket_usage(store: Arc<ECStore>, bucket_name: &str) -> Res
                 1
             };
             versions_count = versions_count.saturating_add(detected_versions);
+
+            // Calculate tier stats
+            let tier = object.storage_class.clone().unwrap_or_else(|| storageclass::STANDARD.to_string());
+            let stats = tier_stats.entry(tier).or_default();
+            stats.total_size = stats.total_size.saturating_add(object_size);
+            stats.num_versions = stats.num_versions.saturating_add(detected_versions as i32);
+            stats.num_objects = stats.num_objects.saturating_add(if object.is_latest { 1 } else { 0 });
         }
 
         if !result.is_truncated {
@@ -372,6 +411,10 @@ pub async fn compute_bucket_usage(store: Arc<ECStore>, bucket_name: &str) -> Res
         objects_count,
         versions_count,
         delete_markers_count: delete_markers,
+        replicated_size: 0,         // Will be populated in aggregation if needed
+        replicated_size_pending: 0, // Will be populated in aggregation if needed
+        replicated_size_failed: 0,  // Will be populated in aggregation if needed
+        tier_stats,
         ..Default::default()
     };
 
@@ -498,7 +541,7 @@ pub async fn build_basic_data_usage_info(store: Arc<ECStore>) -> Result<DataUsag
     match store.list_bucket(&crate::store_api::BucketOptions::default()).await {
         Ok(buckets) => {
             data_usage_info.buckets_count = buckets.len() as u64;
-            data_usage_info.last_update = Some(SystemTime::now());
+            data_usage_info.last_update = Some(format_system_time(SystemTime::now()));
 
             let mut total_objects = 0u64;
             let mut total_versions = 0u64;
@@ -521,6 +564,15 @@ pub async fn build_basic_data_usage_info(store: Arc<ECStore>) -> Result<DataUsag
                             .buckets_usage
                             .insert(bucket_info.name.clone(), bucket_usage.clone());
                         data_usage_info.bucket_sizes.insert(bucket_info.name, bucket_usage.size);
+
+                        // Aggregate tier stats
+                        for (tier, stats) in &bucket_usage.tier_stats {
+                            let aggregated_stats = data_usage_info.tier_stats.entry(tier.clone()).or_default();
+                            aggregated_stats.total_size = aggregated_stats.total_size.saturating_add(stats.total_size);
+                            aggregated_stats.num_versions =
+                                aggregated_stats.num_versions.saturating_add(stats.num_versions);
+                            aggregated_stats.num_objects = aggregated_stats.num_objects.saturating_add(stats.num_objects);
+                        }
                     }
                     Err(e) => {
                         warn!("Failed to compute bucket usage for {}: {}", bucket_info.name, e);
@@ -596,7 +648,7 @@ pub fn cache_to_data_usage_info(cache: &DataUsageCache, path: &str, buckets: &[c
     }
 
     DataUsageInfo {
-        last_update: cache.info.last_update,
+        last_update: cache.info.last_update.clone(),
         objects_total_count: flat.objects as u64,
         versions_total_count: flat.versions as u64,
         delete_markers_total_count: flat.delete_markers as u64,

@@ -174,27 +174,27 @@ pub fn get_sys_errors(_add: &str) -> SysErrors {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct MemInfo {
-    node_common: NodeCommon,
+    pub node_common: NodeCommon,
     #[serde(skip_serializing_if = "Option::is_none")]
-    total: Option<u64>,
+    pub total: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    used: Option<u64>,
+    pub used: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    free: Option<u64>,
+    pub free: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    available: Option<u64>,
+    pub available: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    shared: Option<u64>,
+    pub shared: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    cache: Option<u64>,
+    pub cache: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    buffers: Option<u64>,
+    pub buffers: Option<u64>,
     #[serde(rename = "swap_space_total", skip_serializing_if = "Option::is_none")]
-    swap_space_total: Option<u64>,
+    pub swap_space_total: Option<u64>,
     #[serde(rename = "swap_space_free", skip_serializing_if = "Option::is_none")]
-    swap_space_free: Option<u64>,
+    pub swap_space_free: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    limit: Option<u64>,
+    pub limit: Option<u64>,
 }
 
 pub fn get_mem_info(_addr: &str) -> MemInfo {

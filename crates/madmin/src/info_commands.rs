@@ -57,11 +57,10 @@ pub struct DiskMetrics {
 }
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct Disk {
     pub endpoint: String,
-    #[serde(rename = "rootDisk")]
     pub root_disk: bool,
-    #[serde(rename = "path")]
     pub drive_path: String,
     pub healing: bool,
     pub scanning: bool,
@@ -70,19 +69,12 @@ pub struct Disk {
     pub major: u32,
     pub minor: u32,
     pub model: Option<String>,
-    #[serde(rename = "totalspace")]
     pub total_space: u64,
-    #[serde(rename = "usedspace")]
     pub used_space: u64,
-    #[serde(rename = "availspace")]
     pub available_space: u64,
-    #[serde(rename = "readthroughput")]
     pub read_throughput: f64,
-    #[serde(rename = "writethroughput")]
     pub write_throughput: f64,
-    #[serde(rename = "readlatency")]
     pub read_latency: f64,
-    #[serde(rename = "writelatency")]
     pub write_latency: f64,
     pub utilization: f64,
     pub metrics: Option<DiskMetrics>,

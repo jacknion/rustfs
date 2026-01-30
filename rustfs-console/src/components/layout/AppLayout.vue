@@ -39,8 +39,7 @@
                     <span>Monitoring</span>
                 </span>
             </template>
-            <a-menu-item key="storage-info">Storage Info</a-menu-item>
-            <a-menu-item key="data-usage">Data Usage</a-menu-item>
+            <a-menu-item key="storage-monitoring">Storage Monitoring</a-menu-item>
             <a-menu-item key="metrics">Metrics</a-menu-item>
         </a-sub-menu>
 
@@ -133,8 +132,7 @@ const handleMenuClick = (e: any) => {
     else if (e.key === 'service-accounts') router.push('/iam/service-accounts');
     else if (e.key === 'buckets') router.push('/storage/buckets');
     else if (e.key === 'pools') router.push('/storage/pools');
-    else if (e.key === 'storage-info') router.push('/monitoring/storage');
-    else if (e.key === 'data-usage') router.push('/monitoring/usage');
+    else if (e.key === 'storage-monitoring') router.push('/monitoring/usage');
     else if (e.key === 'metrics') router.push('/monitoring/metrics');
     else if (e.key === 'heal') router.push('/maintenance/heal');
     else if (e.key === 'tier') router.push('/maintenance/tier');
@@ -156,8 +154,8 @@ watch(
         else if (path.includes('/iam/service-accounts')) selectedKeys.value = ['service-accounts'];
         else if (path.includes('/storage/buckets')) selectedKeys.value = ['buckets'];
         else if (path.includes('/storage/pools')) selectedKeys.value = ['pools'];
-        else if (path.includes('/monitoring/storage')) selectedKeys.value = ['storage-info'];
-        else if (path.includes('/monitoring/usage')) selectedKeys.value = ['data-usage'];
+        else if (path.includes('/monitoring/usage')) selectedKeys.value = ['storage-monitoring'];
+        else if (path.includes('/monitoring/storage')) selectedKeys.value = ['storage-monitoring'];
         else if (path.includes('/monitoring/metrics')) selectedKeys.value = ['metrics'];
         else if (path.includes('/maintenance/heal')) selectedKeys.value = ['heal'];
         else if (path.includes('/maintenance/tier')) selectedKeys.value = ['tier'];

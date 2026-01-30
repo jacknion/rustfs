@@ -26,6 +26,12 @@ use std::{
 };
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
+use chrono::{DateTime, Utc};
+
+fn format_system_time(st: SystemTime) -> String {
+    let dt: DateTime<Utc> = st.into();
+    dt.to_rfc3339()
+}
 
 /// node client config
 #[derive(Debug, Clone)]
@@ -643,7 +649,7 @@ mod tests {
         local_usage.buckets_usage.insert("local-bucket".to_string(), local_bucket);
         local_usage.calculate_totals();
         local_usage.buckets_count = local_usage.buckets_usage.len() as u64;
-        local_usage.last_update = Some(SystemTime::now());
+        local_usage.last_update = Some(format_system_time(SystemTime::now()));
 
         let local_progress = ScanProgress {
             current_cycle: 1,
@@ -693,7 +699,7 @@ mod tests {
         remote_usage.buckets_usage.insert("remote-bucket".to_string(), remote_bucket);
         remote_usage.calculate_totals();
         remote_usage.buckets_count = remote_usage.buckets_usage.len() as u64;
-        remote_usage.last_update = Some(SystemTime::now());
+        remote_usage.last_update = Some(format_system_time(SystemTime::now()));
 
         let remote_progress = ScanProgress {
             current_cycle: 2,

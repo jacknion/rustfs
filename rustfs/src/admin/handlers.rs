@@ -24,6 +24,7 @@ use futures::{Stream, StreamExt};
 use http::{HeaderMap, HeaderValue, Uri};
 use hyper::StatusCode;
 use matchit::Params;
+use chrono::{DateTime, Utc};
 use rustfs_common::heal_channel::HealOpts;
 use rustfs_config::{MAX_ADMIN_REQUEST_BODY_SIZE, MAX_HEAL_REQUEST_SIZE};
 use rustfs_credentials::get_global_action_cred;
@@ -48,6 +49,11 @@ use rustfs_ecstore::store_utils::is_reserved_or_invalid_bucket;
 use rustfs_iam::store::MappedPolicy;
 use rustfs_madmin::metrics::RealtimeMetrics;
 use rustfs_madmin::utils::parse_duration;
+
+fn format_system_time(st: std::time::SystemTime) -> String {
+    let dt: DateTime<Utc> = st.into();
+    dt.to_rfc3339()
+}
 use rustfs_policy::policy::Args;
 use rustfs_policy::policy::BucketPolicy;
 use rustfs_policy::policy::action::Action;
@@ -546,7 +552,11 @@ impl Operation for DataUsageInfoHandler {
             info.disk_usage_status = disk_statuses.clone();
         }
 
-        let last_update_age = info.last_update.and_then(|ts| ts.elapsed().ok());
+        let last_update_age = info.last_update.as_ref().and_then(|s| {
+            DateTime::parse_from_rfc3339(s).ok().and_then(|dt| {
+                Utc::now().signed_duration_since(dt.with_timezone(&Utc)).to_std().ok()
+            })
+        });
         let data_missing = info.objects_total_count == 0 && info.buckets_count == 0;
         let stale = last_update_age
             .map(|elapsed| elapsed > std::time::Duration::from_secs(300))
@@ -624,7 +634,7 @@ impl Default for MetricsParams {
             disks: Default::default(),
             hosts: Default::default(),
             tick: Default::default(),
-            n: u64::MAX,
+            n: 0, // Default to 0, which we treat as 1 (snapshot) in the handler
             types: Default::default(),
             by_disk: Default::default(),
             by_host: Default::default(),
@@ -659,7 +669,7 @@ fn extract_metrics_init_params(uri: &Uri) -> MetricsParams {
                 if key == "n"
                     && let Some(value) = parts.next()
                 {
-                    mp.n = value.parse::<u64>().unwrap_or(u64::MAX);
+                    mp.n = value.parse::<u64>().unwrap_or(0);
                 }
                 if key == "types"
                     && let Some(value) = parts.next()
@@ -707,6 +717,70 @@ impl Stream for MetricsStream {
 
 impl ByteStream for MetricsStream {}
 
+fn realtime_metrics_to_prometheus(m: &RealtimeMetrics) -> String {
+    let mut out = String::new();
+    let aggregated = &m.aggregated;
+
+    // Helper to write a metric
+    let write_metric = |out: &mut String, name: &str, help: &str, mtype: &str, value: f64| {
+        out.push_str(&format!("# HELP {} {}\n", name, help));
+        out.push_str(&format!("# TYPE {} {}\n", name, mtype));
+        out.push_str(&format!("{} {}\n", name, value));
+    };
+
+    if let Some(os) = &aggregated.os {
+        for (k, v) in &os.life_time_ops {
+            write_metric(&mut out, &format!("node_os_{}", k), "counter", "lifetime operation count", *v as f64);
+        }
+    }
+
+    if let Some(mem) = &aggregated.mem {
+        if let Some(total) = mem.info.total {
+            write_metric(&mut out, "node_memory_total_bytes", "gauge", "Total memory bytes", total as f64);
+        }
+        if let Some(free) = mem.info.free {
+            write_metric(&mut out, "node_memory_free_bytes", "gauge", "Free memory bytes", free as f64);
+        }
+        if let Some(used) = mem.info.used {
+            write_metric(&mut out, "node_memory_used_bytes", "gauge", "Used memory bytes", used as f64);
+        }
+    }
+
+    if let Some(disk) = &aggregated.disk {
+        write_metric(&mut out, "node_disk_total_disks", "gauge", "Total number of disks", disk.n_disks as f64);
+        write_metric(&mut out, "node_disk_offline_disks", "gauge", "Number of offline disks", disk.offline as f64);
+        write_metric(&mut out, "node_disk_healing_disks", "gauge", "Number of disks being healed", disk.healing as f64);
+        
+        for (k, v) in &disk.life_time_ops {
+            write_metric(&mut out, &format!("node_disk_{}", k), "counter", "Disk lifetime operation count", *v as f64);
+        }
+    }
+
+    if let Some(net) = &aggregated.net {
+        let stats = &net.net_stats;
+        let labels = format!("interface=\"{}\"", stats.name);
+        out.push_str(&format!("# HELP node_network_receive_bytes_total Network bytes received\n"));
+        out.push_str(&format!("# TYPE node_network_receive_bytes_total counter\n"));
+        out.push_str(&format!("node_network_receive_bytes_total{{{}}} {}\n", labels, stats.rx_bytes));
+        
+        out.push_str(&format!("# HELP node_network_transmit_bytes_total Network bytes transmitted\n"));
+        out.push_str(&format!("# TYPE node_network_transmit_bytes_total counter\n"));
+        out.push_str(&format!("node_network_transmit_bytes_total{{{}}} {}\n", labels, stats.tx_bytes));
+    }
+
+    if let Some(rpc) = &aggregated.rpc {
+        write_metric(&mut out, "node_rpc_connected", "gauge", "Number of connected RPC clients", rpc.connected as f64);
+        write_metric(&mut out, "node_rpc_disconnected", "gauge", "Number of disconnected RPC clients", rpc.disconnected as f64);
+        write_metric(&mut out, "node_rpc_incoming_bytes_total", "counter", "Total incoming RPC bytes", rpc.incoming_bytes as f64);
+        write_metric(&mut out, "node_rpc_outgoing_bytes_total", "counter", "Total outgoing RPC bytes", rpc.outgoing_bytes as f64);
+    }
+    
+    // Add a simple timestamp metric
+    write_metric(&mut out, "rustfs_last_scrape_timestamp_seconds", "gauge", "Last scrape timestamp", jiff::Zoned::now().timestamp().as_second() as f64);
+
+    out
+}
+
 pub struct MetricsHandler {}
 
 #[async_trait::async_trait]
@@ -723,7 +797,7 @@ impl Operation for MetricsHandler {
 
         let mut n = mp.n;
         if n == 0 {
-            n = u64::MAX;
+            n = 1; // Default to snapshot for console/general requests
         }
 
         let types = if mp.types != 0 {
@@ -746,7 +820,6 @@ impl Operation for MetricsHandler {
         let host_map = hosts;
 
         let d_id = mp.by_dep_id;
-        let mut interval = interval(tick);
 
         let opts = CollectMetricsOpts {
             hosts: host_map,
@@ -754,6 +827,22 @@ impl Operation for MetricsHandler {
             job_id,
             dep_id: d_id,
         };
+
+        // Check if Prometheus text format is requested
+        let accept = req.headers.get("Accept").and_then(|h| h.to_str().ok()).unwrap_or("");
+        if accept.contains("text/plain") && n == 1 {
+            let m_local = collect_local_metrics(types, &opts).await;
+            let mut m = RealtimeMetrics::default();
+            m.merge(m_local);
+            
+            let prom_text = realtime_metrics_to_prometheus(&m);
+            let mut header = HeaderMap::new();
+            header.insert(CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"));
+            
+            return Ok(S3Response::with_headers((StatusCode::OK, Body::from(prom_text)), header));
+        }
+
+        let mut interval = interval(tick);
         let (tx, rx) = mpsc::channel(10);
         let in_stream: DynByteStream = Box::pin(MetricsStream {
             inner: ReceiverStream::new(rx),
@@ -1279,7 +1368,7 @@ async fn collect_realtime_data_usage(
     let buckets = store.list_bucket(&BucketOptions::default()).await?;
 
     info.buckets_count = buckets.len() as u64;
-    info.last_update = Some(std::time::SystemTime::now());
+    info.last_update = Some(format_system_time(std::time::SystemTime::now()));
     info.buckets_usage.clear();
     info.bucket_sizes.clear();
     info.disk_usage_status.clear();

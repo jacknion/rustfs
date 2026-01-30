@@ -27,12 +27,18 @@ use serde_json::{from_slice, to_vec};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use chrono::{DateTime, Utc};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::{fs, task};
 use tracing::warn;
 use walkdir::WalkDir;
 
 const STATE_FILE_EXTENSION: &str = "";
+
+fn format_system_time(st: SystemTime) -> String {
+    let dt: DateTime<Utc> = st.into();
+    dt.to_rfc3339()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LocalObjectUsage {
@@ -270,7 +276,7 @@ fn scan_disk_blocking(root: PathBuf, meta: LocalUsageSnapshotMeta, mut state: In
 
     let snapshot = build_snapshot(meta, &state.objects, now);
     status.snapshot_exists = true;
-    status.last_update = Some(now);
+    status.last_update = Some(format_system_time(now));
 
     Ok(DiskScanResult {
         snapshot,

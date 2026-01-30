@@ -18,7 +18,13 @@
       <a-row :gutter="16">
         <a-col :xs="24" :sm="12" :md="8">
           <a-card size="small">
-            <a-statistic title="Version" :value="version" />
+            <a-statistic title="Version" :value="formattedVersion">
+              <template #formatter>
+                <a-tooltip :title="version">
+                  <span>{{ formattedVersion }}</span>
+                </a-tooltip>
+              </template>
+            </a-statistic>
           </a-card>
         </a-col>
         <a-col :xs="24" :sm="12" :md="8">
@@ -109,6 +115,21 @@ const version = computed(() => {
     if (v) return formatScalar(v);
   }
   return '-';
+});
+
+const formattedVersion = computed(() => {
+  const v = version.value;
+  if (!v || v === '-') return '-';
+  
+  // Format: 2026-01-30T09:33:15+08:00@2e8644b9
+  // Target: 2026-01-30 09:33 (2e8644b)
+  const match = v.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}):\d{2}.*?@([a-f0-9]+)$/);
+  if (match) {
+    const [_, date, time, hash] = match;
+    const shortHash = hash.substring(0, 7);
+    return `${date} ${time} (${shortHash})`;
+  }
+  return v;
 });
 
 const uptime = computed(() => {

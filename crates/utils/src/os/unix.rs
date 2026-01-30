@@ -22,7 +22,7 @@ pub fn get_info(p: impl AsRef<Path>) -> std::io::Result<DiskInfo> {
     let path_display = p.as_ref().display();
     let stat = statvfs(p.as_ref())?;
 
-    let bsize = stat.block_size();
+    let bsize = stat.fragment_size();
     let bfree = stat.blocks_free() as u64;
     let bavail = stat.blocks_available() as u64;
     let blocks = stat.blocks() as u64;

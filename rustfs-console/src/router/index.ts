@@ -10,8 +10,7 @@ import ServiceAccountsView from '../views/iam/ServiceAccountsView.vue'
 import BucketsView from '../views/storage/BucketsView.vue'
 import ObjectBrowser from '../views/storage/ObjectBrowser.vue'
 import PoolsView from '../views/storage/PoolsView.vue'
-import StorageInfoView from '../views/monitoring/StorageInfoView.vue'
-import DataUsageView from '../views/monitoring/DataUsageView.vue'
+import StorageMonitoringView from '../views/monitoring/StorageMonitoringView.vue'
 import MetricsView from '../views/monitoring/MetricsView.vue'
 import HealView from '../views/maintenance/HealView.vue'
 import TierView from '../views/maintenance/TierView.vue'
@@ -76,14 +75,13 @@ const router = createRouter({
         },
         // Monitoring routes
         {
-          path: 'monitoring/storage',
-          name: 'StorageInfo',
-          component: StorageInfoView
+          path: 'monitoring/usage',
+          name: 'StorageMonitoring',
+          component: StorageMonitoringView
         },
         {
-          path: 'monitoring/usage',
-          name: 'DataUsage',
-          component: DataUsageView
+          path: 'monitoring/storage',
+          redirect: '/monitoring/usage'
         },
         {
           path: 'monitoring/metrics',

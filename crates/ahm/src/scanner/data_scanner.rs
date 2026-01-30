@@ -36,6 +36,7 @@ use rustfs_ecstore::{
 };
 use rustfs_filemeta::{MetacacheReader, VersionType};
 use s3s::dto::{BucketVersioningStatus, VersioningConfiguration};
+use chrono::{DateTime, Utc};
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -46,6 +47,11 @@ use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use uuid;
+
+fn format_system_time(st: SystemTime) -> String {
+    let dt: DateTime<Utc> = st.into();
+    dt.to_rfc3339()
+}
 
 /// Custom scan mode enum for AHM scanner
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -401,10 +407,10 @@ impl Scanner {
         let mut latest_update: Option<SystemTime> = None;
 
         for snapshot in &outcome.snapshots {
-            if let Some(update) = snapshot.last_update
-                && latest_update.is_none_or(|current| update > current)
-            {
-                latest_update = Some(update);
+            if let Some(update) = snapshot.last_update {
+                if latest_update.is_none() || (latest_update.as_ref().map(|s| update > *s).unwrap_or(false)) {
+                    latest_update = Some(update);
+                }
             }
 
             aggregated.objects_total_count = aggregated.objects_total_count.saturating_add(snapshot.objects_total_count);
@@ -432,7 +438,7 @@ impl Scanner {
         }
 
         aggregated.buckets_count = aggregated.buckets_usage.len() as u64;
-        aggregated.last_update = latest_update;
+        aggregated.last_update = latest_update.map(format_system_time);
 
         self.node_scanner.update_data_usage(aggregated.clone()).await;
         let local_stats = self.node_scanner.get_stats_summary().await;
@@ -442,7 +448,7 @@ impl Scanner {
         guard.clear();
         for (bucket, usage) in &aggregated.buckets_usage {
             let mut bucket_data = DataUsageInfo::new();
-            bucket_data.last_update = aggregated.last_update;
+            bucket_data.last_update = aggregated.last_update.clone();
             bucket_data.buckets_count = 1;
             bucket_data.objects_total_count = usage.objects_count;
             bucket_data.versions_total_count = usage.versions_count;
@@ -900,7 +906,7 @@ impl Scanner {
                 match aggregate_local_snapshots(ecstore.clone()).await {
                     Ok((_, mut aggregated)) => {
                         if aggregated.last_update.is_none() {
-                            aggregated.last_update = Some(SystemTime::now());
+                            aggregated.last_update = Some(format_system_time(SystemTime::now()));
                         }
                         aggregated
                     }
@@ -960,7 +966,7 @@ impl Scanner {
         // Make sure bucket counters reflect aggregated content
         data_usage.buckets_count = data_usage.buckets_usage.len() as u64;
         if data_usage.last_update.is_none() {
-            data_usage.last_update = Some(SystemTime::now());
+            data_usage.last_update = Some(format_system_time(SystemTime::now()));
         }
 
         // Publish to node stats manager
@@ -1033,7 +1039,7 @@ impl Scanner {
         {
             Ok(buckets) => {
                 data_usage.buckets_count = buckets.len() as u64;
-                data_usage.last_update = Some(SystemTime::now());
+                data_usage.last_update = Some(format_system_time(SystemTime::now()));
 
                 let mut total_objects = 0u64;
                 let mut total_versions = 0u64;
