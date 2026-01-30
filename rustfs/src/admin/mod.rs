@@ -30,12 +30,9 @@ use handlers::{
     event::{ListNotificationTargets, ListTargetsArns, NotificationTarget, RemoveNotificationTarget},
     group, kms, kms_dynamic, kms_keys, policies, pools,
     profile::{TriggerProfileCPU, TriggerProfileMemory},
-<<<<<<< HEAD
     rebalance,
     s3_metadata::{QueryS3MetadataByTagsHandler, QueryS3MetadataHandler},
-=======
-    quota, rebalance,
->>>>>>> upstream/main
+    quota,
     service_account::{AddServiceAccount, DeleteServiceAccount, InfoServiceAccount, ListServiceAccount, UpdateServiceAccount},
     sts, tier, user,
 };

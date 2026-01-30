@@ -560,13 +560,8 @@ fn setup_console_middleware_stack(
         .route(FAVICON_PATH, get(static_handler))
         .route(&format!("{CONSOLE_PREFIX}/license"), get(license_handler))
         .route(&format!("{CONSOLE_PREFIX}/version"), get(version_handler))
-<<<<<<< HEAD
-        .route(&format!("{CONSOLE_PREFIX}/health"), get(health_check).head(health_check))
-        .nest(CONSOLE_PREFIX, Router::new().fallback_service(get(nested_static_handler)))
-=======
         .route(&format!("{CONSOLE_PREFIX}{HEALTH_PREFIX}"), get(health_check).head(health_check))
-        .nest(CONSOLE_PREFIX, Router::new().fallback_service(get(static_handler)))
->>>>>>> upstream/main
+        .nest(CONSOLE_PREFIX, Router::new().fallback_service(get(nested_static_handler)))
         .fallback_service(get(static_handler));
 
     // Add comprehensive middleware layers using tower-http features
