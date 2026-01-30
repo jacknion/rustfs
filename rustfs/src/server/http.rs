@@ -184,16 +184,34 @@ pub async fn start_http_server(
 
         info!(
             target: "rustfs::console::startup",
+<<<<<<< HEAD
             "Console WebUI available at: {console_url}"
+=======
+            "Console WebUI available at: {protocol}://{local_ip_str}:{server_port}/rustfs/console/index.html"
+        );
+        info!(
+            target: "rustfs::console::startup",
+            "Console WebUI (localhost): {protocol}://127.0.0.1:{server_port}/rustfs/console/index.html",
+
+>>>>>>> upstream/main
         );
         if opt.public_url.is_none() {
             info!(
                 target: "rustfs::console::startup",
-        );
+                "Console WebUI (localhost): {console_localhost_url}",
+            );
+        }
 
         println!("Console WebUI Start Time: {now_time}");
+<<<<<<< HEAD
+        println!("Console WebUI available at: {console_url}");
+        if opt.public_url.is_none() {
+            println!("Console WebUI (localhost): {console_localhost_url}");
+        }
+=======
         println!("Console WebUI available at: {protocol}://{local_ip_str}:{server_port}/rustfs/console/index.html");
         println!("Console WebUI (localhost): {protocol}://127.0.0.1:{server_port}/rustfs/console/index.html");
+>>>>>>> upstream/main
     } else {
         info!(target: "rustfs::main::startup","RustFS API: {api_endpoints}  {localhost_endpoint}");
         println!("RustFS Http API: {api_endpoints}  {localhost_endpoint}");

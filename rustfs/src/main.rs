@@ -34,11 +34,14 @@ use crate::server::{
     SHUTDOWN_TIMEOUT, ServiceState, ServiceStateManager, ShutdownSignal, init_cert, init_event_notifier, shutdown_event_notifier,
     start_audit_system, start_http_server, stop_audit_system, wait_for_shutdown,
 };
+<<<<<<< HEAD
 use crate::storage::database::{
     DatabaseConfig, MetadataSyncConfig, init_database_pool, init_metadata_sync_service, shutdown_database_pool,
     shutdown_metadata_sync_service,
 };
 use chrono::Datelike;
+=======
+>>>>>>> upstream/main
 use clap::Parser;
 use license::init_license;
 use rustfs_ahm::{create_ahm_services_cancel_token, heal::storage::ECStoreHealStorage, init_heal_manager, shutdown_ahm_services};
@@ -230,10 +233,15 @@ async fn run(opt: config::Opt) -> Result<()> {
 
     let s3_shutdown_tx = {
         let mut s3_opt = opt.clone();
+<<<<<<< HEAD
         // If console is on a separate port, disable it for the S3 service
         // Otherwise, keep console enabled on the same port
         s3_opt.console_enable = opt.console_enable && !console_on_separate_port;
+        let s3_shutdown_tx = start_http_server(&s3_opt, state_manager.clone()).await?;
+=======
+        s3_opt.console_enable = false;
         let s3_shutdown_tx = start_http_server(&s3_opt, state_manager.clone(), readiness.clone()).await?;
+>>>>>>> upstream/main
         Some(s3_shutdown_tx)
     };
 
@@ -281,6 +289,7 @@ async fn run(opt: config::Opt) -> Result<()> {
     // Initialize KMS system if enabled
     init_kms_system(&opt).await?;
 
+<<<<<<< HEAD
     // Initialize database connection pool if database URL is configured
     if let Some(database_url) = &opt.database_url {
         
@@ -324,7 +333,7 @@ async fn run(opt: config::Opt) -> Result<()> {
             "No database URL configured, skipping database initialization"
         );
     }
-
+=======
     // Create a shutdown channel for FTP/SFTP services
     let (ftp_sftp_shutdown_tx, _) = tokio::sync::broadcast::channel(1);
 
@@ -333,6 +342,7 @@ async fn run(opt: config::Opt) -> Result<()> {
 
     // Initialize SFTP system if enabled
     init_sftp_system(ftp_sftp_shutdown_tx.clone()).await.map_err(Error::other)?;
+>>>>>>> upstream/main
 
     // Initialize buffer profiling system
     init_buffer_profile_system(&opt);

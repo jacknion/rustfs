@@ -21,7 +21,6 @@ use crate::storage::concurrency::{
 };
 use crate::storage::head_prefix::{head_prefix_not_found_message, probe_prefix_has_children};
 use crate::storage::helper::OperationHelper;
-use crate::storage::metadata_sync_hooks::{sync_delete_object_metadata, sync_put_object_metadata};
 use crate::storage::options::{filter_object_metadata, get_content_sha256};
 use crate::storage::{
     access::{ReqInfo, authorize_request, has_bypass_governance_header},
@@ -368,9 +367,6 @@ impl FS {
                     .put_object(&bucket, &fpath, &mut reader, &ObjectOptions::default())
                     .await
                     .map_err(ApiError::from)?;
-
-                // Sync metadata to database (non-blocking)
-                sync_put_object_metadata(&_obj_info, req.credentials.as_ref().map(|c| c.access_key.clone()));
 
                 // Invalidate cache for the written object to prevent stale data
                 let manager = get_concurrency_manager();
@@ -1624,9 +1620,6 @@ impl S3 for FS {
             return Ok(S3Response::with_status(DeleteObjectOutput::default(), StatusCode::NO_CONTENT));
         }
 
-        // Sync metadata to database (non-blocking)
-        sync_delete_object_metadata(&bucket, &key);
-
         if obj_info.replication_status == ReplicationStatusType::Replica
             || obj_info.version_purge_status == VersionPurgeStatusType::Pending
         {
@@ -1966,10 +1959,6 @@ impl S3 for FS {
                 if let Some(&size) = object_sizes.get(&obj.object_name) {
                     rustfs_ecstore::data_usage::decrement_bucket_usage_memory(&bucket, size as u64).await;
                 }
-                
-                // Sync metadata to database (non-blocking)
-                sync_delete_object_metadata(&bucket, &obj.object_name);
-
                 continue;
             }
 
@@ -4829,9 +4818,6 @@ impl S3 for FS {
             .put_object(&bucket, &key, &mut reader, &opts)
             .await
             .map_err(ApiError::from)?;
-
-        // Sync metadata to database (non-blocking)
-        sync_put_object_metadata(&obj_info, req.credentials.as_ref().map(|c| c.access_key.clone()));
 
         // Fast in-memory update for immediate quota consistency
         rustfs_ecstore::data_usage::increment_bucket_usage_memory(&bucket, obj_info.size as u64).await;
