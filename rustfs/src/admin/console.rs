@@ -81,7 +81,7 @@ fn serve_static_file_with_redirect(path: &str, original_path: &str) -> Response<
     if path.is_empty() {
         path = "index.html"
     }
-    
+
     // Try to get the file directly
     if let Some(file) = StaticFiles::get(path) {
         let mime_type = from_path(path).first_or_octet_stream();
@@ -91,7 +91,7 @@ fn serve_static_file_with_redirect(path: &str, original_path: &str) -> Response<
             .body(Body::from(file.data))
             .unwrap();
     }
-    
+
     // If path doesn't end with '/', check if it's a directory and redirect
     if !path.ends_with('/') {
         let index_path = format!("{}/index.html", path);
@@ -105,14 +105,14 @@ fn serve_static_file_with_redirect(path: &str, original_path: &str) -> Response<
                 .unwrap();
         }
     }
-    
+
     // If path ends with '/', try to get index.html in that directory
     let index_path = if path.ends_with('/') {
         format!("{}index.html", path)
     } else {
         format!("{}/index.html", path)
     };
-    
+
     if let Some(file) = StaticFiles::get(&index_path) {
         let mime_type = from_path("index.html").first_or_octet_stream();
         return Response::builder()
@@ -121,7 +121,7 @@ fn serve_static_file_with_redirect(path: &str, original_path: &str) -> Response<
             .body(Body::from(file.data))
             .unwrap();
     }
-    
+
     // Fallback to root index.html for SPA routing
     if let Some(file) = StaticFiles::get("index.html") {
         let mime_type = from_path("index.html").first_or_octet_stream();
@@ -156,10 +156,7 @@ impl Config {
             // Parse the public URL to extract base components
             // Expected format: https://www.example.com:444/rustfs or https://www.example.com:444
             let url_trimmed = url.trim_end_matches('/');
-            (
-                format!("{url_trimmed}{RUSTFS_ADMIN_PREFIX}"),
-                url_trimmed.to_string(),
-            )
+            (format!("{url_trimmed}{RUSTFS_ADMIN_PREFIX}"), url_trimmed.to_string())
         } else {
             (
                 format!("http://{local_ip}:{port}{RUSTFS_ADMIN_PREFIX}"),

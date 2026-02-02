@@ -1379,7 +1379,7 @@ impl DiskAPI for LocalDisk {
         if format_info.file_info.is_some() && id.is_some() {
             // check last check time
             if let Some(last_check) = format_info.last_check
-                && last_check.unix_timestamp() + 1 < OffsetDateTime::now_utc().unix_timestamp()
+                && last_check.unix_timestamp() + 1 > OffsetDateTime::now_utc().unix_timestamp()
             {
                 return Ok(id);
             }

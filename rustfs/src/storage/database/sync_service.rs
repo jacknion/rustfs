@@ -375,8 +375,9 @@ async fn flush_batch(
             match retry_database_operation(
                 || S3ObjectRepository::update(pool, &bucket, &object_key, &update_obj),
                 config.max_retries,
-                config.retry_delay_ms
-            ).await
+                config.retry_delay_ms,
+            )
+            .await
             {
                 Ok(_) => {
                     success_count += 1;

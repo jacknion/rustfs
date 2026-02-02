@@ -30,6 +30,7 @@ use tracing::{debug, warn};
 ///
 /// * `obj_info` - Object information from the put operation
 /// * `owner_id` - Optional owner ID for the object
+#[allow(dead_code)]
 pub fn sync_put_object_metadata(obj_info: &ObjectInfo, owner_id: Option<String>) {
     // Extract encryption information
     let encryption = MetadataExtractor::extract_encryption(obj_info);
@@ -67,6 +68,7 @@ pub fn sync_put_object_metadata(obj_info: &ObjectInfo, owner_id: Option<String>)
 ///
 /// * `bucket` - Bucket name
 /// * `object_key` - Object key
+#[allow(dead_code)]
 pub fn sync_delete_object_metadata(bucket: &str, object_key: &str) {
     debug!(
         target: "rustfs::storage::metadata_sync_hooks",
@@ -100,9 +102,10 @@ pub fn sync_delete_object_metadata(bucket: &str, object_key: &str) {
 /// * `bucket` - Bucket name
 /// * `object_key` - Object key
 /// * `tags` - Tag key-value pairs
+#[allow(dead_code)]
 pub fn sync_object_tags(bucket: &str, object_key: &str, tags: std::collections::HashMap<String, String>) {
-    use crate::storage::database::{UpdateS3Object, MetadataSyncEvent, send_sync_event};
-    
+    use crate::storage::database::{MetadataSyncEvent, UpdateS3Object, send_sync_event};
+
     debug!(
         target: "rustfs::storage::metadata_sync_hooks",
         bucket = %bucket,

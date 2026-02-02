@@ -23,6 +23,7 @@ use crate::{
         local_scan::{self, LocalObjectRecord, LocalScanOutcome},
     },
 };
+use chrono::{DateTime, Utc};
 use rustfs_common::data_usage::{DataUsageInfo, SizeSummary};
 use rustfs_common::metrics::{Metric, Metrics, global_metrics};
 use rustfs_ecstore::{
@@ -36,7 +37,6 @@ use rustfs_ecstore::{
 };
 use rustfs_filemeta::{MetacacheReader, VersionType};
 use s3s::dto::{BucketVersioningStatus, VersioningConfiguration};
-use chrono::{DateTime, Utc};
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -407,10 +407,10 @@ impl Scanner {
         let mut latest_update: Option<SystemTime> = None;
 
         for snapshot in &outcome.snapshots {
-            if let Some(update) = snapshot.last_update {
-                if latest_update.is_none() || (latest_update.as_ref().map(|s| update > *s).unwrap_or(false)) {
-                    latest_update = Some(update);
-                }
+            if let Some(update) = snapshot.last_update
+                && (latest_update.is_none() || latest_update.as_ref().map(|s| update > *s).unwrap_or(false))
+            {
+                latest_update = Some(update);
             }
 
             aggregated.objects_total_count = aggregated.objects_total_count.saturating_add(snapshot.objects_total_count);

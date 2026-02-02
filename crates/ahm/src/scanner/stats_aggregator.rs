@@ -26,9 +26,11 @@ use std::{
 };
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
-use chrono::{DateTime, Utc};
 
+#[cfg(test)]
 fn format_system_time(st: SystemTime) -> String {
+    use chrono::{DateTime, Utc};
+
     let dt: DateTime<Utc> = st.into();
     dt.to_rfc3339()
 }

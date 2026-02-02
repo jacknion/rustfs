@@ -324,6 +324,14 @@ pub async fn save_format_file(disk: &Option<DiskStore>, format: &Option<FormatV3
 
     let json_data = format.to_json()?;
 
+    // Ensure the metadata volume exists (e.g. `.rustfs.sys/`) before writing format.json.
+    // This matters when a disk directory was wiped and recreated.
+    if let Err(e) = disk.make_volume(RUSTFS_META_BUCKET).await
+        && e != DiskError::VolumeExists
+    {
+        return Err(e);
+    }
+
     let tmpfile = Uuid::new_v4().to_string();
 
     disk.write_all(RUSTFS_META_BUCKET, tmpfile.as_str(), json_data.into_bytes().into())

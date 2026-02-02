@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use chrono::{DateTime, Utc};
 use path_clean::PathClean;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -20,7 +21,6 @@ use std::{
     path::Path,
     time::SystemTime,
 };
-use chrono::{DateTime, Utc};
 
 #[derive(Clone, Copy, Default, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -1176,7 +1176,7 @@ impl DataUsageInfo {
         if let Some(other_update_str) = &other.last_update {
             let other_update = DateTime::parse_from_rfc3339(other_update_str).ok();
             let current_update = self.last_update.as_ref().and_then(|s| DateTime::parse_from_rfc3339(s).ok());
-            
+
             if current_update.is_none() || (other_update.is_some() && other_update > current_update) {
                 self.last_update = Some(other_update_str.clone());
             }

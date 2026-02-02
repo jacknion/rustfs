@@ -20,11 +20,11 @@ use crate::auth::get_session_token;
 use crate::error::ApiError;
 use crate::server::RemoteAddr;
 use bytes::Bytes;
+use chrono::{DateTime, Utc};
 use futures::{Stream, StreamExt};
 use http::{HeaderMap, HeaderValue, Uri};
 use hyper::StatusCode;
 use matchit::Params;
-use chrono::{DateTime, Utc};
 use rustfs_common::heal_channel::HealOpts;
 use rustfs_config::{MAX_ADMIN_REQUEST_BODY_SIZE, MAX_HEAL_REQUEST_SIZE};
 use rustfs_credentials::get_global_action_cred;
@@ -553,9 +553,9 @@ impl Operation for DataUsageInfoHandler {
         }
 
         let last_update_age = info.last_update.as_ref().and_then(|s| {
-            DateTime::parse_from_rfc3339(s).ok().and_then(|dt| {
-                Utc::now().signed_duration_since(dt.with_timezone(&Utc)).to_std().ok()
-            })
+            DateTime::parse_from_rfc3339(s)
+                .ok()
+                .and_then(|dt| Utc::now().signed_duration_since(dt.with_timezone(&Utc)).to_std().ok())
         });
         let data_missing = info.objects_total_count == 0 && info.buckets_count == 0;
         let stale = last_update_age
@@ -610,12 +610,13 @@ impl Operation for DataUsageInfoHandler {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 struct MetricsParams {
     disks: String,
     hosts: String,
     #[serde(rename = "interval")]
     tick: String,
+    // Default to 0, which we treat as 1 (snapshot) in the handler.
     n: u64,
     types: u32,
     #[serde(rename = "by-disk")]
@@ -626,22 +627,6 @@ struct MetricsParams {
     by_job_id: String,
     #[serde(rename = "by-depID")]
     by_dep_id: String,
-}
-
-impl Default for MetricsParams {
-    fn default() -> Self {
-        Self {
-            disks: Default::default(),
-            hosts: Default::default(),
-            tick: Default::default(),
-            n: 0, // Default to 0, which we treat as 1 (snapshot) in the handler
-            types: Default::default(),
-            by_disk: Default::default(),
-            by_host: Default::default(),
-            by_job_id: Default::default(),
-            by_dep_id: Default::default(),
-        }
-    }
 }
 
 fn extract_metrics_init_params(uri: &Uri) -> MetricsParams {
@@ -748,35 +733,83 @@ fn realtime_metrics_to_prometheus(m: &RealtimeMetrics) -> String {
 
     if let Some(disk) = &aggregated.disk {
         write_metric(&mut out, "node_disk_total_disks", "gauge", "Total number of disks", disk.n_disks as f64);
-        write_metric(&mut out, "node_disk_offline_disks", "gauge", "Number of offline disks", disk.offline as f64);
-        write_metric(&mut out, "node_disk_healing_disks", "gauge", "Number of disks being healed", disk.healing as f64);
-        
+        write_metric(
+            &mut out,
+            "node_disk_offline_disks",
+            "gauge",
+            "Number of offline disks",
+            disk.offline as f64,
+        );
+        write_metric(
+            &mut out,
+            "node_disk_healing_disks",
+            "gauge",
+            "Number of disks being healed",
+            disk.healing as f64,
+        );
+
         for (k, v) in &disk.life_time_ops {
-            write_metric(&mut out, &format!("node_disk_{}", k), "counter", "Disk lifetime operation count", *v as f64);
+            write_metric(
+                &mut out,
+                &format!("node_disk_{}", k),
+                "counter",
+                "Disk lifetime operation count",
+                *v as f64,
+            );
         }
     }
 
     if let Some(net) = &aggregated.net {
         let stats = &net.net_stats;
         let labels = format!("interface=\"{}\"", stats.name);
-        out.push_str(&format!("# HELP node_network_receive_bytes_total Network bytes received\n"));
-        out.push_str(&format!("# TYPE node_network_receive_bytes_total counter\n"));
+        out.push_str("# HELP node_network_receive_bytes_total Network bytes received\n");
+        out.push_str("# TYPE node_network_receive_bytes_total counter\n");
         out.push_str(&format!("node_network_receive_bytes_total{{{}}} {}\n", labels, stats.rx_bytes));
-        
-        out.push_str(&format!("# HELP node_network_transmit_bytes_total Network bytes transmitted\n"));
-        out.push_str(&format!("# TYPE node_network_transmit_bytes_total counter\n"));
+
+        out.push_str("# HELP node_network_transmit_bytes_total Network bytes transmitted\n");
+        out.push_str("# TYPE node_network_transmit_bytes_total counter\n");
         out.push_str(&format!("node_network_transmit_bytes_total{{{}}} {}\n", labels, stats.tx_bytes));
     }
 
     if let Some(rpc) = &aggregated.rpc {
-        write_metric(&mut out, "node_rpc_connected", "gauge", "Number of connected RPC clients", rpc.connected as f64);
-        write_metric(&mut out, "node_rpc_disconnected", "gauge", "Number of disconnected RPC clients", rpc.disconnected as f64);
-        write_metric(&mut out, "node_rpc_incoming_bytes_total", "counter", "Total incoming RPC bytes", rpc.incoming_bytes as f64);
-        write_metric(&mut out, "node_rpc_outgoing_bytes_total", "counter", "Total outgoing RPC bytes", rpc.outgoing_bytes as f64);
+        write_metric(
+            &mut out,
+            "node_rpc_connected",
+            "gauge",
+            "Number of connected RPC clients",
+            rpc.connected as f64,
+        );
+        write_metric(
+            &mut out,
+            "node_rpc_disconnected",
+            "gauge",
+            "Number of disconnected RPC clients",
+            rpc.disconnected as f64,
+        );
+        write_metric(
+            &mut out,
+            "node_rpc_incoming_bytes_total",
+            "counter",
+            "Total incoming RPC bytes",
+            rpc.incoming_bytes as f64,
+        );
+        write_metric(
+            &mut out,
+            "node_rpc_outgoing_bytes_total",
+            "counter",
+            "Total outgoing RPC bytes",
+            rpc.outgoing_bytes as f64,
+        );
     }
-    
+
     // Add a simple timestamp metric
-    write_metric(&mut out, "rustfs_last_scrape_timestamp_seconds", "gauge", "Last scrape timestamp", jiff::Zoned::now().timestamp().as_second() as f64);
+    write_metric(
+        &mut out,
+        "rustfs_last_scrape_timestamp_seconds",
+        "gauge",
+        "Last scrape timestamp",
+        jiff::Zoned::now().timestamp().as_second() as f64,
+    );
 
     out
 }
@@ -834,11 +867,11 @@ impl Operation for MetricsHandler {
             let m_local = collect_local_metrics(types, &opts).await;
             let mut m = RealtimeMetrics::default();
             m.merge(m_local);
-            
+
             let prom_text = realtime_metrics_to_prometheus(&m);
             let mut header = HeaderMap::new();
             header.insert(CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"));
-            
+
             return Ok(S3Response::with_headers((StatusCode::OK, Body::from(prom_text)), header));
         }
 

@@ -88,10 +88,14 @@ impl S3ObjectRepository {
     ///
     /// Returns the ID of the inserted/updated record
     pub async fn upsert(pool: &PgPool, obj: &CreateS3Object) -> Result<i64, sqlx::Error> {
-        let tags_json = obj.tags.as_ref()
+        let tags_json = obj
+            .tags
+            .as_ref()
             .and_then(|t| serde_json::to_value(t).ok())
             .unwrap_or_else(|| serde_json::json!({}));
-        let user_metadata_json = obj.user_metadata.as_ref()
+        let user_metadata_json = obj
+            .user_metadata
+            .as_ref()
             .and_then(|m| serde_json::to_value(m).ok())
             .unwrap_or_else(|| serde_json::json!({}));
 
@@ -361,28 +365,28 @@ impl S3ObjectRepository {
         }
 
         // Apply tag filters if specified (exact match)
-        if let Some(ref tags) = query.tags {
-            if !tags.is_empty() {
-                let tags_json = serde_json::to_value(tags).unwrap_or_default();
-                qb.push(" AND tags @> ");
-                qb.push_bind(tags_json);
-            }
+        if let Some(tags) = query.tags.as_ref()
+            && !tags.is_empty()
+        {
+            let tags_json = serde_json::to_value(tags).unwrap_or_default();
+            qb.push(" AND tags @> ");
+            qb.push_bind(tags_json);
         }
 
         // Apply fuzzy tag filters if specified (partial match, case-insensitive)
-        if let Some(ref tags_fuzzy) = query.tags_fuzzy {
-            if !tags_fuzzy.is_empty() {
-                for (key, value) in tags_fuzzy {
-                    // Use jsonb_path_exists for flexible JSON querying
-                    // Search for tag key that contains the search pattern (case-insensitive)
-                    qb.push(" AND EXISTS (");
-                    qb.push("   SELECT 1 FROM jsonb_each_text(tags) AS t(k, v)");
-                    qb.push("   WHERE LOWER(t.k) ILIKE ");
-                    qb.push_bind(format!("%{}%", key.to_lowercase()));
-                    qb.push("   AND LOWER(t.v) ILIKE ");
-                    qb.push_bind(format!("%{}%", value.to_lowercase()));
-                    qb.push(" )");
-                }
+        if let Some(tags_fuzzy) = query.tags_fuzzy.as_ref()
+            && !tags_fuzzy.is_empty()
+        {
+            for (key, value) in tags_fuzzy {
+                // Use jsonb_path_exists for flexible JSON querying
+                // Search for tag key that contains the search pattern (case-insensitive)
+                qb.push(" AND EXISTS (");
+                qb.push("   SELECT 1 FROM jsonb_each_text(tags) AS t(k, v)");
+                qb.push("   WHERE LOWER(t.k) ILIKE ");
+                qb.push_bind(format!("%{}%", key.to_lowercase()));
+                qb.push("   AND LOWER(t.v) ILIKE ");
+                qb.push_bind(format!("%{}%", value.to_lowercase()));
+                qb.push(" )");
             }
         }
 

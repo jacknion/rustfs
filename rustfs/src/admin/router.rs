@@ -132,10 +132,7 @@ where
         }
 
         // Allow unauthenticated access to database health endpoint (console internal use)
-        if self.console_enabled
-            && req.method == Method::GET
-            && path == "/rustfs/admin/v3/database/health"
-        {
+        if self.console_enabled && req.method == Method::GET && path == "/rustfs/admin/v3/database/health" {
             return Ok(());
         }
 

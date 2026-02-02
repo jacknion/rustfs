@@ -38,7 +38,6 @@ use crate::storage::database::{
     DatabaseConfig, MetadataSyncConfig, init_database_pool, init_metadata_sync_service, shutdown_database_pool,
     shutdown_metadata_sync_service,
 };
-use chrono::Datelike;
 use clap::Parser;
 use license::init_license;
 use rustfs_ahm::{create_ahm_services_cancel_token, heal::storage::ECStoreHealStorage, init_heal_manager, shutdown_ahm_services};
@@ -283,14 +282,13 @@ async fn run(opt: config::Opt) -> Result<()> {
 
     // Initialize database connection pool if database URL is configured
     if let Some(database_url) = &opt.database_url {
-        
         let db_config = DatabaseConfig {
             url: database_url.clone(),
             max_connections: opt.database_max_connections,
             connect_timeout: std::time::Duration::from_secs(30),
             idle_timeout: std::time::Duration::from_secs(600),
         };
-        
+
         init_database_pool(db_config).await.map_err(|e| {
             error!(
                 target: "rustfs::main::run",

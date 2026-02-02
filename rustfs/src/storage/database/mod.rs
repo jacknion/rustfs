@@ -159,12 +159,12 @@ pub async fn shutdown_database_pool() {
 
 /// Mask sensitive information in database URL for logging
 fn mask_database_url(url: &str) -> String {
-    if let Some(pos) = url.find("://") {
-        if let Some(at_pos) = url[pos + 3..].find('@') {
-            let scheme = &url[..pos + 3];
-            let after_at = &url[pos + 3 + at_pos..];
-            return format!("{scheme}***{after_at}");
-        }
+    if let Some(pos) = url.find("://")
+        && let Some(at_pos) = url[pos + 3..].find('@')
+    {
+        let scheme = &url[..pos + 3];
+        let after_at = &url[pos + 3 + at_pos..];
+        return format!("{scheme}***{after_at}");
     }
     "***".to_string()
 }
@@ -211,18 +211,15 @@ async fn ensure_database_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
     // Execute schema creation SQL
     // Using include_str! to embed the SQL file at compile time
     let schema_sql = include_str!("../../../../scripts/s3_metadata_schema.sql");
-    
+
     // Split and execute SQL statements (PostgreSQL allows multi-statement execution)
-    sqlx::query(schema_sql)
-        .execute(pool)
-        .await
-        .inspect_err(|err| {
-            error!(
-                target: "rustfs::storage::database",
-                error = %err,
-                "Failed to create database schema"
-            );
-        })?;
+    sqlx::query(schema_sql).execute(pool).await.inspect_err(|err| {
+        error!(
+            target: "rustfs::storage::database",
+            error = %err,
+            "Failed to create database schema"
+        );
+    })?;
 
     info!(
         target: "rustfs::storage::database",
