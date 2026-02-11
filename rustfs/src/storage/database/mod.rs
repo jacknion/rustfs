@@ -212,8 +212,8 @@ async fn ensure_database_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
     // Using include_str! to embed the SQL file at compile time
     let schema_sql = include_str!("../../../../scripts/s3_metadata_schema.sql");
 
-    // Split and execute SQL statements (PostgreSQL allows multi-statement execution)
-    sqlx::query(schema_sql).execute(pool).await.inspect_err(|err| {
+    // Use raw_sql to execute multi-statement SQL (sqlx::query only supports single statements)
+    sqlx::raw_sql(schema_sql).execute(pool).await.inspect_err(|err| {
         error!(
             target: "rustfs::storage::database",
             error = %err,

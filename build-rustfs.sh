@@ -421,11 +421,20 @@ build_binary() {
             fi
             build_cmd="cross build"
         else
-            # Use zigbuild for Linux ARM64 (matches working version)
+            # Use zigbuild for Linux cross-compilation (e.g. from macOS -> linux/amd64 or linux/arm64)
+            # This avoids relying on host linkers/toolchains.
             if ! command -v cargo-zigbuild &> /dev/null; then
-                print_message $RED "❌ cargo-zigbuild not found. Please install it first."
+                print_message $YELLOW "📦 Installing cargo-zigbuild for Linux cross-compilation..."
+                cargo install cargo-zigbuild
+                export PATH="$HOME/.cargo/bin:$PATH"
+            fi
+
+            if ! command -v cargo-zigbuild &> /dev/null; then
+                print_message $RED "❌ cargo-zigbuild not found after installation attempt."
+                print_message $YELLOW "💡 Try: export PATH=\"$HOME/.cargo/bin:$PATH\" && cargo install cargo-zigbuild"
                 return 1
             fi
+
             build_cmd="cargo zigbuild"
         fi
     else

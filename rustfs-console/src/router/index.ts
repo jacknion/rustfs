@@ -21,7 +21,7 @@ import NotificationsView from '../views/settings/NotificationsView.vue'
 import MetadataQueryView from '../views/tools/MetadataQueryView.vue'
 
 const router = createRouter({
-  history: createWebHistory(),
+  history: createWebHistory('/rustfs/console/'),
   routes: [
     {
       path: '/login',

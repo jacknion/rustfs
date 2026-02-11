@@ -68,6 +68,24 @@ const signRequest = async (config: InternalAxiosRequestConfig) => {
       signPath = signPath.replace(/^\/s3api/, '');
       if (signPath === '') signPath = '/';
   }
+  // Note: /rustfs/admin/ paths are passed through to RustFS as-is
+
+  // Extract query string embedded in URL path (e.g. "/{bucket}?policy&key=val")
+  // SigV4 requires path and query to be separate for correct canonical request
+  let urlQuery: Record<string, string> = {};
+  const qIdx = signPath.indexOf('?');
+  if (qIdx >= 0) {
+      const qs = signPath.slice(qIdx + 1);
+      signPath = signPath.slice(0, qIdx);
+      for (const part of qs.split('&')) {
+          const eqIdx = part.indexOf('=');
+          if (eqIdx >= 0) {
+              urlQuery[decodeURIComponent(part.slice(0, eqIdx))] = decodeURIComponent(part.slice(eqIdx + 1));
+          } else {
+              urlQuery[decodeURIComponent(part)] = '';
+          }
+      }
+  }
 
   // Handle Body
   let body = data;
@@ -96,25 +114,36 @@ const signRequest = async (config: InternalAxiosRequestConfig) => {
     }
   }
 
-  // We access RustFS through the Vite dev proxy in development.
-  let protocol = window.location.protocol;
-  let hostname = window.location.hostname;
-  let port = parseInt(window.location.port) || (protocol === 'https:' ? 443 : 80);
-
+  // In SigV4, the canonical request includes the exact `host` header value.
+  // In production, the browser sends the Host header for the public domain.
   // In development, Vite proxy (changeOrigin: true) sends Host: 127.0.0.1:9000 to the backend.
-  // We must sign the request with the same Host that the backend receives.
-  // This matches the target in vite.config.ts (using IP to avoid localhost IPv4/IPv6 ambiguity)
-  if (import.meta.env.DEV) {
-    protocol = 'http:';
-    hostname = '127.0.0.1';
-    port = 9000;
+  // We must sign with the same host value the backend will verify.
+  const requestHost = import.meta.env.DEV ? '127.0.0.1:9000' : window.location.host;
+  const protocol = import.meta.env.DEV ? 'http:' : window.location.protocol;
+
+  // Parse hostname/port for HttpRequest. (Host header itself is provided via `signHeaders.host`.)
+  let hostname = requestHost;
+  let port: number | undefined;
+  if (requestHost.startsWith('[')) {
+    const end = requestHost.indexOf(']');
+    if (end > 0) {
+      hostname = requestHost.slice(1, end);
+      const rest = requestHost.slice(end + 1);
+      if (rest.startsWith(':')) port = parseInt(rest.slice(1), 10);
+    }
+  } else {
+    const parts = requestHost.split(':');
+    if (parts.length === 2 && parts[0] && parts[1]) {
+      hostname = parts[0];
+      port = parseInt(parts[1], 10);
+    }
   }
 
   // IMPORTANT: avoid signing transient/proxy-mutated headers (accept, user-agent, etc).
   // Sign the minimal stable set to prevent SignatureDoesNotMatch.
   const contentType = getHeaderValue(headers, 'content-type');
   const signHeaders: Record<string, string> = {
-    host: port && port !== 80 && port !== 443 ? `${hostname}:${port}` : hostname,
+    host: requestHost,
     'x-amz-content-sha256': headers['x-amz-content-sha256'],
   };
   if (contentType) signHeaders['content-type'] = contentType;
@@ -122,7 +151,7 @@ const signRequest = async (config: InternalAxiosRequestConfig) => {
 
   // Ensure all query params are strings for signing to match how they are sent on the wire
   // (Fixes SignatureDoesNotMatch when params contains numbers like list-type=2)
-  const signQuery: Record<string, string> = {};
+  const signQuery: Record<string, string> = { ...urlQuery };
   if (params) {
     for (const key in params) {
        const val = params[key];

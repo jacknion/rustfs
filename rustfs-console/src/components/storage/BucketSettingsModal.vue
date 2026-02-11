@@ -8,6 +8,56 @@
     >
         <a-spin :spinning="loading">
             <a-tabs v-model:activeKey="activeTab" size="small">
+                <!-- Access Policy Tab -->
+                <a-tab-pane key="access" tab="Access Policy">
+                    <a-alert 
+                        style="margin-bottom: 16px;"
+                        :message="accessLevelDescription"
+                        :type="accessLevel === 'private' ? 'success' : accessLevel === 'public' ? 'error' : 'warning'"
+                        show-icon 
+                    />
+                    <a-form layout="vertical">
+                        <a-form-item label="Anonymous Access">
+                            <a-radio-group v-model:value="accessLevel" button-style="solid" @change="onAccessLevelChange">
+                                <a-radio-button value="private">Private</a-radio-button>
+                                <a-radio-button value="download">Download</a-radio-button>
+                                <a-radio-button value="upload">Upload</a-radio-button>
+                                <a-radio-button value="public">Public</a-radio-button>
+                                <a-radio-button value="custom">Custom</a-radio-button>
+                            </a-radio-group>
+                            <div style="color: #888; font-size: 12px; margin-top: 8px;">
+                                <div v-if="accessLevel === 'private'">All access requires authentication (AccessKey/SecretKey)</div>
+                                <div v-else-if="accessLevel === 'download'">Anyone can download and list objects without authentication</div>
+                                <div v-else-if="accessLevel === 'upload'">Anyone can upload objects without authentication</div>
+                                <div v-else-if="accessLevel === 'public'">Anyone can upload, download, and delete objects without authentication</div>
+                                <div v-else>Custom policy — edit the JSON below</div>
+                            </div>
+                        </a-form-item>
+                        <a-form-item v-if="accessLevel === 'custom'" label="Policy JSON">
+                            <a-textarea 
+                                v-model:value="policyJson" 
+                                :rows="12" 
+                                style="font-family: monospace; font-size: 12px;"
+                                placeholder='{&#10;  "Version": "2012-10-17",&#10;  "Statement": []&#10;}'
+                            />
+                        </a-form-item>
+                        <a-form-item>
+                            <a-space>
+                                <a-button type="primary" @click="saveAccessPolicy" :loading="saving">
+                                    Save Policy
+                                </a-button>
+                                <a-popconfirm 
+                                    v-if="accessLevel !== 'private'" 
+                                    title="Remove all anonymous access?" 
+                                    @confirm="removePolicy"
+                                >
+                                    <a-button danger :loading="saving">Remove Policy</a-button>
+                                </a-popconfirm>
+                            </a-space>
+                        </a-form-item>
+                    </a-form>
+                </a-tab-pane>
+
                 <!-- Versioning Tab -->
                 <a-tab-pane key="versioning" tab="Versioning">
                     <a-descriptions :column="1" bordered size="small">
@@ -46,31 +96,6 @@
                     />
                 </a-tab-pane>
 
-                <!-- Object Locking Tab -->
-                <a-tab-pane key="object-lock" tab="Object Lock">
-                    <a-descriptions :column="1" bordered size="small">
-                        <a-descriptions-item label="Object Lock Enabled">
-                            <a-tag :color="objectLockConfig.enabled ? 'green' : 'default'">
-                                {{ objectLockConfig.enabled ? 'Yes' : 'No' }}
-                            </a-tag>
-                        </a-descriptions-item>
-                        <template v-if="objectLockConfig.enabled">
-                            <a-descriptions-item label="Retention Mode" v-if="objectLockConfig.mode">
-                                {{ objectLockConfig.mode }}
-                            </a-descriptions-item>
-                            <a-descriptions-item label="Retention Period" v-if="objectLockConfig.days || objectLockConfig.years">
-                                {{ objectLockConfig.days ? `${objectLockConfig.days} days` : `${objectLockConfig.years} years` }}
-                            </a-descriptions-item>
-                        </template>
-                    </a-descriptions>
-                    <a-alert 
-                        type="warning" 
-                        style="margin-top: 16px;"
-                        message="Object Locking can only be enabled during bucket creation."
-                        show-icon 
-                    />
-                </a-tab-pane>
-
                 <!-- Quota Tab -->
                 <a-tab-pane key="quota" tab="Quota">
                     <a-form layout="vertical">
@@ -99,157 +124,16 @@
                         </a-form-item>
                     </a-form>
                 </a-tab-pane>
-
-                <!-- Lifecycle Tab -->
-                <a-tab-pane key="lifecycle" tab="Lifecycle">
-                    <a-table 
-                        :columns="lifecycleColumns" 
-                        :data-source="lifecycleRules" 
-                        :pagination="false"
-                        size="small"
-                        row-key="id"
-                    >
-                        <template #bodyCell="{ column, record }">
-                            <template v-if="column.key === 'status'">
-                                <a-tag :color="record.status === 'Enabled' ? 'green' : 'default'">
-                                    {{ record.status }}
-                                </a-tag>
-                            </template>
-                            <template v-if="column.key === 'action'">
-                                <a-popconfirm title="Delete this rule?" @confirm="deleteLifecycleRule(record.id)">
-                                    <a-button type="link" danger size="small">Delete</a-button>
-                                </a-popconfirm>
-                            </template>
-                        </template>
-                        <template #emptyText>
-                            <a-empty description="No lifecycle rules configured" />
-                        </template>
-                    </a-table>
-                    <a-divider />
-                    <a-form layout="inline" style="margin-top: 12px;">
-                        <a-form-item label="Rule ID">
-                            <a-input v-model:value="newRule.id" placeholder="rule-1" style="width: 120px;" />
-                        </a-form-item>
-                        <a-form-item label="Prefix">
-                            <a-input v-model:value="newRule.prefix" placeholder="logs/" style="width: 120px;" />
-                        </a-form-item>
-                        <a-form-item label="Expire Days">
-                            <a-input-number v-model:value="newRule.expirationDays" :min="1" style="width: 80px;" />
-                        </a-form-item>
-                        <a-form-item>
-                            <a-button type="primary" @click="addLifecycleRule" :loading="saving">Add Rule</a-button>
-                        </a-form-item>
-                    </a-form>
-                </a-tab-pane>
-
-                <!-- Events/Notifications Tab -->
-                <a-tab-pane key="events" tab="Events">
-                    <a-table 
-                        :columns="eventColumns" 
-                        :data-source="notifications" 
-                        :pagination="false"
-                        size="small"
-                        row-key="id"
-                    >
-                        <template #bodyCell="{ column, record }">
-                            <template v-if="column.key === 'events'">
-                                <a-tag v-for="evt in record.events" :key="evt" style="margin: 2px;">
-                                    {{ evt.replace('s3:', '') }}
-                                </a-tag>
-                            </template>
-                            <template v-if="column.key === 'target'">
-                                {{ record.queueArn || record.topicArn || record.lambdaArn || '-' }}
-                            </template>
-                        </template>
-                        <template #emptyText>
-                            <a-empty description="No event notifications configured" />
-                        </template>
-                    </a-table>
-                    <a-alert 
-                        type="info" 
-                        style="margin-top: 16px;"
-                        message="Configure event notifications via CLI or API."
-                        show-icon 
-                    />
-                </a-tab-pane>
-
-                <!-- Replication Tab -->
-                <a-tab-pane key="replication" tab="Replication">
-                    <a-descriptions :column="1" bordered size="small" v-if="replication.role">
-                        <a-descriptions-item label="Role ARN">
-                            {{ replication.role }}
-                        </a-descriptions-item>
-                    </a-descriptions>
-                    <a-table 
-                        :columns="replicationColumns" 
-                        :data-source="replication.rules" 
-                        :pagination="false"
-                        size="small"
-                        row-key="id"
-                        style="margin-top: 12px;"
-                    >
-                        <template #bodyCell="{ column, record }">
-                            <template v-if="column.key === 'status'">
-                                <a-tag :color="record.status === 'Enabled' ? 'green' : 'default'">
-                                    {{ record.status }}
-                                </a-tag>
-                            </template>
-                        </template>
-                        <template #emptyText>
-                            <a-empty description="No replication rules configured" />
-                        </template>
-                    </a-table>
-                    <a-alert 
-                        type="info" 
-                        style="margin-top: 16px;"
-                        message="Configure replication via CLI or API."
-                        show-icon 
-                    />
-                </a-tab-pane>
-
-                <!-- Tags Tab -->
-                <a-tab-pane key="tags" tab="Tags">
-                    <a-table 
-                        :columns="tagColumns" 
-                        :data-source="tagList" 
-                        :pagination="false"
-                        size="small"
-                        row-key="key"
-                    >
-                        <template #bodyCell="{ column, record }">
-                            <template v-if="column.key === 'action'">
-                                <a-popconfirm title="Delete this tag?" @confirm="deleteTag(record.key)">
-                                    <a-button type="link" danger size="small">Delete</a-button>
-                                </a-popconfirm>
-                            </template>
-                        </template>
-                        <template #emptyText>
-                            <a-empty description="No tags configured" />
-                        </template>
-                    </a-table>
-                    <a-divider />
-                    <a-form layout="inline" style="margin-top: 12px;">
-                        <a-form-item label="Key">
-                            <a-input v-model:value="newTag.key" placeholder="environment" style="width: 150px;" />
-                        </a-form-item>
-                        <a-form-item label="Value">
-                            <a-input v-model:value="newTag.value" placeholder="production" style="width: 150px;" />
-                        </a-form-item>
-                        <a-form-item>
-                            <a-button type="primary" @click="addTag" :loading="saving">Add Tag</a-button>
-                        </a-form-item>
-                    </a-form>
-                </a-tab-pane>
             </a-tabs>
         </a-spin>
     </a-modal>
 </template>
 
 <script setup lang="ts">
-import { ref, watch, computed, reactive } from 'vue';
+import { ref, watch, computed } from 'vue';
 import { message } from 'ant-design-vue';
 import * as bucketApi from '@/api/s3/bucket';
-import type { LifecycleRule, NotificationConfig, ReplicationRule } from '@/api/s3/bucket';
+import type { AccessLevel } from '@/api/s3/bucket';
 
 const props = defineProps<{
     open: boolean;
@@ -267,76 +151,97 @@ const visible = computed({
 
 const loading = ref(false);
 const saving = ref(false);
-const activeTab = ref('versioning');
+const activeTab = ref('access');
+
+// Access Policy
+const accessLevel = ref<AccessLevel>('private');
+const policyJson = ref('');
+const accessLevelDescription = computed(() => {
+    switch (accessLevel.value) {
+        case 'private': return 'This bucket is private. All access requires authentication.';
+        case 'download': return 'This bucket allows anonymous download and listing.';
+        case 'upload': return 'This bucket allows anonymous upload.';
+        case 'public': return 'Warning: This bucket is fully public. Anyone can read and write.';
+        case 'custom': return 'This bucket has a custom access policy.';
+        default: return '';
+    }
+});
 
 // Versioning
 const versioningStatus = ref('Disabled');
 const versioningEnabled = computed(() => versioningStatus.value === 'Enabled');
 
-// Object Lock
-const objectLockConfig = ref<{ enabled: boolean; mode?: string; days?: number; years?: number }>({ enabled: false });
-
 // Quota
 const quotaValue = ref(0);
 const quotaUnit = ref('GB');
 
-// Lifecycle
-const lifecycleRules = ref<LifecycleRule[]>([]);
-const lifecycleColumns = [
-    { title: 'ID', dataIndex: 'id', key: 'id' },
-    { title: 'Prefix', dataIndex: 'prefix', key: 'prefix' },
-    { title: 'Status', key: 'status' },
-    { title: 'Expire Days', dataIndex: 'expirationDays', key: 'expirationDays' },
-    { title: 'Action', key: 'action', width: 80 }
-];
-const newRule = reactive({ id: '', prefix: '', expirationDays: 30 });
+const onAccessLevelChange = () => {
+    if (accessLevel.value !== 'custom') {
+        policyJson.value = bucketApi.generatePolicy(props.bucketName, accessLevel.value);
+    }
+};
 
-// Notifications
-const notifications = ref<NotificationConfig[]>([]);
-const eventColumns = [
-    { title: 'ID', dataIndex: 'id', key: 'id' },
-    { title: 'Events', key: 'events' },
-    { title: 'Target', key: 'target' }
-];
+const saveAccessPolicy = async () => {
+    saving.value = true;
+    try {
+        if (accessLevel.value === 'private') {
+            await bucketApi.deleteBucketPolicy(props.bucketName);
+            policyJson.value = '';
+        } else {
+            const policy = accessLevel.value === 'custom' 
+                ? policyJson.value 
+                : bucketApi.generatePolicy(props.bucketName, accessLevel.value);
+            if (!policy) {
+                await bucketApi.deleteBucketPolicy(props.bucketName);
+            } else {
+                await bucketApi.putBucketPolicy(props.bucketName, policy);
+            }
+            policyJson.value = policy;
+        }
+        message.success('Access policy updated');
+    } catch (e: any) {
+        message.error('Failed to update access policy: ' + (e.message || 'Unknown error'));
+    } finally {
+        saving.value = false;
+    }
+};
 
-// Replication
-const replication = ref<{ role: string; rules: ReplicationRule[] }>({ role: '', rules: [] });
-const replicationColumns = [
-    { title: 'ID', dataIndex: 'id', key: 'id' },
-    { title: 'Status', key: 'status' },
-    { title: 'Priority', dataIndex: 'priority', key: 'priority' },
-    { title: 'Destination', dataIndex: 'destination', key: 'destination' }
-];
-
-// Tags
-const tags = ref<Record<string, string>>({});
-const tagList = computed(() => Object.entries(tags.value).map(([key, value]) => ({ key, value })));
-const tagColumns = [
-    { title: 'Key', dataIndex: 'key', key: 'key' },
-    { title: 'Value', dataIndex: 'value', key: 'value' },
-    { title: 'Action', key: 'action', width: 80 }
-];
-const newTag = reactive({ key: '', value: '' });
+const removePolicy = async () => {
+    saving.value = true;
+    try {
+        await bucketApi.deleteBucketPolicy(props.bucketName);
+        accessLevel.value = 'private';
+        policyJson.value = '';
+        message.success('Access policy removed');
+    } catch (e) {
+        message.error('Failed to remove access policy');
+    } finally {
+        saving.value = false;
+    }
+};
 
 const fetchSettings = async () => {
     if (!props.bucketName) return;
     loading.value = true;
     try {
-        const [versioningRes, lockRes, quotaRes, tagsRes, lifecycleRes, notifRes, replRes] = await Promise.all([
+        const results = await Promise.allSettled([
+            bucketApi.getBucketPolicy(props.bucketName),
             bucketApi.getBucketVersioning(props.bucketName),
-            bucketApi.getBucketObjectLockConfig(props.bucketName),
             bucketApi.getBucketQuota(props.bucketName),
-            bucketApi.getBucketTags(props.bucketName),
-            bucketApi.getBucketLifecycle(props.bucketName),
-            bucketApi.getBucketNotifications(props.bucketName),
-            bucketApi.getBucketReplication(props.bucketName)
         ]);
+
+        const val = <T>(r: PromiseSettledResult<T>, fallback: T): T =>
+            r.status === 'fulfilled' ? r.value : fallback;
+
+        // Access Policy
+        const policyRes = val(results[0], '');
+        policyJson.value = policyRes;
+        accessLevel.value = bucketApi.detectAccessLevel(policyRes);
         
-        versioningStatus.value = versioningRes.status;
-        objectLockConfig.value = lockRes;
+        versioningStatus.value = val(results[1], { status: 'Disabled' }).status;
         
         // Convert bytes to appropriate unit
-        const quotaBytes = quotaRes.quota || 0;
+        const quotaBytes = val(results[2], { quota: 0 }).quota || 0;
         if (quotaBytes >= 1024 * 1024 * 1024 * 1024) {
             quotaValue.value = quotaBytes / (1024 * 1024 * 1024 * 1024);
             quotaUnit.value = 'TB';
@@ -347,11 +252,6 @@ const fetchSettings = async () => {
             quotaValue.value = quotaBytes / (1024 * 1024);
             quotaUnit.value = 'MB';
         }
-        
-        tags.value = tagsRes;
-        lifecycleRules.value = lifecycleRes;
-        notifications.value = notifRes;
-        replication.value = replRes;
     } catch (e) {
         console.error('Failed to fetch bucket settings:', e);
     } finally {
@@ -402,98 +302,13 @@ const saveQuota = async () => {
     }
 };
 
-// Lifecycle actions
-const addLifecycleRule = async () => {
-    if (!newRule.id) {
-        message.warning('Please enter a rule ID');
-        return;
-    }
-    saving.value = true;
-    try {
-        const updatedRules = [...lifecycleRules.value, {
-            id: newRule.id,
-            prefix: newRule.prefix,
-            status: 'Enabled' as const,
-            expirationDays: newRule.expirationDays
-        }];
-        await bucketApi.putBucketLifecycle(props.bucketName, updatedRules);
-        lifecycleRules.value = updatedRules;
-        newRule.id = '';
-        newRule.prefix = '';
-        newRule.expirationDays = 30;
-        message.success('Lifecycle rule added');
-    } catch (e) {
-        message.error('Failed to add lifecycle rule');
-    } finally {
-        saving.value = false;
-    }
-};
-
-const deleteLifecycleRule = async (ruleId: string) => {
-    saving.value = true;
-    try {
-        const updatedRules = lifecycleRules.value.filter(r => r.id !== ruleId);
-        if (updatedRules.length === 0) {
-            await bucketApi.deleteBucketLifecycle(props.bucketName);
-        } else {
-            await bucketApi.putBucketLifecycle(props.bucketName, updatedRules);
-        }
-        lifecycleRules.value = updatedRules;
-        message.success('Lifecycle rule deleted');
-    } catch (e) {
-        message.error('Failed to delete lifecycle rule');
-    } finally {
-        saving.value = false;
-    }
-};
-
-// Tag actions
-const addTag = async () => {
-    if (!newTag.key) {
-        message.warning('Please enter a tag key');
-        return;
-    }
-    saving.value = true;
-    try {
-        const updatedTags = { ...tags.value, [newTag.key]: newTag.value };
-        await bucketApi.putBucketTags(props.bucketName, updatedTags);
-        tags.value = updatedTags;
-        newTag.key = '';
-        newTag.value = '';
-        message.success('Tag added');
-    } catch (e) {
-        message.error('Failed to add tag');
-    } finally {
-        saving.value = false;
-    }
-};
-
-const deleteTag = async (tagKey: string) => {
-    saving.value = true;
-    try {
-        const updatedTags = { ...tags.value };
-        delete updatedTags[tagKey];
-        if (Object.keys(updatedTags).length === 0) {
-            await bucketApi.deleteBucketTags(props.bucketName);
-        } else {
-            await bucketApi.putBucketTags(props.bucketName, updatedTags);
-        }
-        tags.value = updatedTags;
-        message.success('Tag deleted');
-    } catch (e) {
-        message.error('Failed to delete tag');
-    } finally {
-        saving.value = false;
-    }
-};
-
 const handleClose = () => {
     visible.value = false;
 };
 
 watch(() => props.open, (newVal) => {
     if (newVal) {
-        activeTab.value = 'versioning';
+        activeTab.value = 'access';
         fetchSettings();
     }
 });

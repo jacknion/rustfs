@@ -119,6 +119,110 @@ export const downloadObject = async (bucketName: string, key: string) => {
 
 // ===== Bucket Settings APIs =====
 
+// Bucket Policy (Access Control)
+export const getBucketPolicy = async (bucketName: string): Promise<string> => {
+    try {
+        const res = await s3Api.get(`/${bucketName}?policy`, { responseType: 'text' });
+        return typeof res.data === 'string' ? res.data : JSON.stringify(res.data, null, 2);
+    } catch (e: any) {
+        if (e.response?.status === 404) return '';
+        // NoSuchBucketPolicy
+        if (e.response?.data?.includes?.('NoSuchBucketPolicy') || 
+            e.response?.status === 404) return '';
+        throw e;
+    }
+};
+
+export const putBucketPolicy = async (bucketName: string, policyJson: string) => {
+    return s3Api.put(`/${bucketName}?policy`, policyJson, {
+        headers: { 'Content-Type': 'application/json' }
+    });
+};
+
+export const deleteBucketPolicy = async (bucketName: string) => {
+    return s3Api.delete(`/${bucketName}?policy`);
+};
+
+/**
+ * Detect the current anonymous access level from bucket policy
+ */
+export type AccessLevel = 'private' | 'download' | 'upload' | 'public' | 'custom';
+
+export const detectAccessLevel = (policyJson: string): AccessLevel => {
+    if (!policyJson) return 'private';
+    try {
+        const policy = JSON.parse(policyJson);
+        const statements = policy.Statement || [];
+        
+        let hasGetObject = false;
+        let hasPutObject = false;
+        let hasListBucket = false;
+        
+        for (const stmt of statements) {
+            if (stmt.Effect !== 'Allow') continue;
+            const principal = stmt.Principal;
+            const isPublic = principal === '*' || principal?.AWS === '*' || 
+                           (Array.isArray(principal?.AWS) && principal.AWS.includes('*'));
+            if (!isPublic) continue;
+            
+            const actions = Array.isArray(stmt.Action) ? stmt.Action : [stmt.Action];
+            for (const action of actions) {
+                if (action === 's3:GetObject' || action === 's3:*') hasGetObject = true;
+                if (action === 's3:PutObject' || action === 's3:*') hasPutObject = true;
+                if (action === 's3:ListBucket' || action === 's3:*') hasListBucket = true;
+                if (action === 's3:GetBucketLocation') hasListBucket = true;
+            }
+        }
+        
+        if (hasGetObject && hasPutObject) return 'public';
+        if (hasGetObject && hasListBucket) return 'download';
+        if (hasPutObject) return 'upload';
+        if (hasGetObject) return 'download';
+        
+        return 'custom';
+    } catch {
+        return 'custom';
+    }
+};
+
+/**
+ * Generate a standard bucket policy JSON for a given access level
+ */
+export const generatePolicy = (bucketName: string, level: AccessLevel): string => {
+    if (level === 'private') return '';
+
+    const statements: any[] = [];
+
+    if (level === 'download' || level === 'public') {
+        statements.push({
+            Effect: 'Allow',
+            Principal: { AWS: ['*'] },
+            Action: ['s3:GetBucketLocation', 's3:ListBucket'],
+            Resource: [`arn:aws:s3:::${bucketName}`]
+        });
+        statements.push({
+            Effect: 'Allow',
+            Principal: { AWS: ['*'] },
+            Action: ['s3:GetObject'],
+            Resource: [`arn:aws:s3:::${bucketName}/*`]
+        });
+    }
+
+    if (level === 'upload' || level === 'public') {
+        statements.push({
+            Effect: 'Allow',
+            Principal: { AWS: ['*'] },
+            Action: ['s3:PutObject', 's3:DeleteObject'],
+            Resource: [`arn:aws:s3:::${bucketName}/*`]
+        });
+    }
+
+    return JSON.stringify({
+        Version: '2012-10-17',
+        Statement: statements
+    }, null, 2);
+};
+
 // Versioning
 export const getBucketVersioning = async (bucketName: string): Promise<{ status: string }> => {
     const res = await s3Api.get(`/${bucketName}?versioning`, { responseType: 'text' });
@@ -169,10 +273,10 @@ import api from '@/api/request';
 
 export const getBucketQuota = async (bucketName: string): Promise<{ quota: number }> => {
     try {
-        const res = await api.get(`/buckets/${bucketName}/quota`);
+        const res = await api.get(`/quota/${bucketName}`);
         return res.data || { quota: 0 };
     } catch (e: any) {
-        if (e.response?.status === 404) {
+        if (e.response?.status === 404 || e.response?.status === 501) {
             return { quota: 0 };
         }
         throw e;
@@ -180,7 +284,7 @@ export const getBucketQuota = async (bucketName: string): Promise<{ quota: numbe
 };
 
 export const putBucketQuota = async (bucketName: string, quota: number) => {
-    return api.put(`/buckets/${bucketName}/quota`, { quota });
+    return api.put(`/quota/${bucketName}`, { quota });
 };
 
 // Bucket Tags
@@ -200,7 +304,7 @@ export const getBucketTags = async (bucketName: string): Promise<Record<string, 
         }
         return tags;
     } catch (e: any) {
-        if (e.response?.status === 404) {
+        if (e.response?.status === 404 || e.response?.status === 501) {
             return {};
         }
         throw e;
@@ -260,7 +364,7 @@ export const getBucketLifecycle = async (bucketName: string): Promise<LifecycleR
         }
         return rules;
     } catch (e: any) {
-        if (e.response?.status === 404) {
+        if (e.response?.status === 404 || e.response?.status === 501) {
             return [];
         }
         throw e;
@@ -344,7 +448,7 @@ export const getBucketNotifications = async (bucketName: string): Promise<Notifi
 
         return configs;
     } catch (e: any) {
-        if (e.response?.status === 404) {
+        if (e.response?.status === 404 || e.response?.status === 501) {
             return [];
         }
         throw e;
@@ -381,7 +485,7 @@ export const getBucketReplication = async (bucketName: string): Promise<{ role: 
         }
         return { role, rules };
     } catch (e: any) {
-        if (e.response?.status === 404) {
+        if (e.response?.status === 404 || e.response?.status === 501) {
             return { role: '', rules: [] };
         }
         throw e;
@@ -392,7 +496,7 @@ export const getBucketReplication = async (bucketName: string): Promise<{ role: 
 export const getBucketUsage = async (bucketName: string): Promise<{ objectCount: number; size: number }> => {
     try {
         // First try to get from admin API
-        const res = await api.get(`/buckets/${bucketName}/usage`);
+        const res = await api.get(`/bucket-usage/${bucketName}`);
         if (res.data && (res.data.objectCount > 0 || res.data.size > 0)) {
             return res.data;
         }

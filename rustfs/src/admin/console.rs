@@ -25,8 +25,6 @@ use axum::{
 };
 use axum_server::tls_rustls::RustlsConfig;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
-use mime_guess::from_path;
-use rust_embed::RustEmbed;
 use rustfs_config::{RUSTFS_TLS_CERT, RUSTFS_TLS_KEY};
 use serde::Serialize;
 use serde_json::json;
@@ -44,99 +42,6 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 use tracing::{debug, error, info, instrument, warn};
-
-#[derive(RustEmbed)]
-#[folder = "$CARGO_MANIFEST_DIR/static"]
-struct StaticFiles;
-
-/// Static file handler
-///
-/// Serves static files embedded in the binary using rust-embed.
-/// If the requested file is not found, it serves index.html as a fallback.
-/// If index.html is also not found, it returns a 404 Not Found response.
-///
-/// # Arguments:
-/// - `uri`: The request URI.
-///
-/// # Returns:
-/// - An `impl IntoResponse` containing the static file content or a 404 response.
-///
-async fn static_handler(uri: Uri) -> impl IntoResponse {
-    let path = uri.path();
-    serve_static_file_with_redirect(path, path)
-}
-
-/// Static file handler for nested routes (strips CONSOLE_PREFIX)
-async fn nested_static_handler(uri: Uri) -> impl IntoResponse {
-    let path = uri.path();
-    // When using axum's nest(), the prefix is already stripped from uri.path()
-    // So we need to reconstruct the full path for redirects
-    let full_path = format!("{}{}", CONSOLE_PREFIX, path);
-    serve_static_file_with_redirect(path, &full_path)
-}
-
-/// Core static file serving logic with directory redirect support
-fn serve_static_file_with_redirect(path: &str, original_path: &str) -> Response<Body> {
-    let mut path = path.trim_start_matches('/');
-    if path.is_empty() {
-        path = "index.html"
-    }
-
-    // Try to get the file directly
-    if let Some(file) = StaticFiles::get(path) {
-        let mime_type = from_path(path).first_or_octet_stream();
-        return Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", mime_type.to_string())
-            .body(Body::from(file.data))
-            .unwrap();
-    }
-
-    // If path doesn't end with '/', check if it's a directory and redirect
-    if !path.ends_with('/') {
-        let index_path = format!("{}/index.html", path);
-        if StaticFiles::get(&index_path).is_some() {
-            // It's a directory, redirect to add trailing slash
-            let redirect_path = format!("{}/", original_path);
-            return Response::builder()
-                .status(StatusCode::MOVED_PERMANENTLY)
-                .header("Location", redirect_path)
-                .body(Body::empty())
-                .unwrap();
-        }
-    }
-
-    // If path ends with '/', try to get index.html in that directory
-    let index_path = if path.ends_with('/') {
-        format!("{}index.html", path)
-    } else {
-        format!("{}/index.html", path)
-    };
-
-    if let Some(file) = StaticFiles::get(&index_path) {
-        let mime_type = from_path("index.html").first_or_octet_stream();
-        return Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", mime_type.to_string())
-            .body(Body::from(file.data))
-            .unwrap();
-    }
-
-    // Fallback to root index.html for SPA routing
-    if let Some(file) = StaticFiles::get("index.html") {
-        let mime_type = from_path("index.html").first_or_octet_stream();
-        Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", mime_type.to_string())
-            .body(Body::from(file.data))
-            .unwrap()
-    } else {
-        Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(Body::from(" 404 Not Found \n RustFS "))
-            .unwrap()
-    }
-}
 
 #[derive(Debug, Serialize, Clone)]
 pub(crate) struct Config {
@@ -554,12 +459,9 @@ fn setup_console_middleware_stack(
     auth_timeout: u64,
 ) -> Router {
     let mut app = Router::new()
-        .route(FAVICON_PATH, get(static_handler))
         .route(&format!("{CONSOLE_PREFIX}/license"), get(license_handler))
         .route(&format!("{CONSOLE_PREFIX}/version"), get(version_handler))
-        .route(&format!("{CONSOLE_PREFIX}{HEALTH_PREFIX}"), get(health_check).head(health_check))
-        .nest(CONSOLE_PREFIX, Router::new().fallback_service(get(nested_static_handler)))
-        .fallback_service(get(static_handler));
+        .route(&format!("{CONSOLE_PREFIX}{HEALTH_PREFIX}"), get(health_check).head(health_check));
 
     // Add comprehensive middleware layers using tower-http features
     app = app

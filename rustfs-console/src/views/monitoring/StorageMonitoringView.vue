@@ -136,10 +136,10 @@
                     <a-card title="Disk Details" v-if="storageInfo">
                         <a-table 
                             :columns="diskColumns" 
-                            :data-source="storageInfo.disks || []" 
+                            :data-source="mergedDisks" 
                             row-key="uuid"
                             size="small"
-                            :scroll="{ x: 800 }"
+                            :scroll="{ x: 700 }"
                         >
                             <template #bodyCell="{ column, record }">
                                 <template v-if="column.key === 'state'">
@@ -200,34 +200,79 @@ const tierColumns = [
 ];
 
 const diskColumns = [
-    { title: 'Drive Path', dataIndex: 'drivePath', key: 'drivePath', width: 250 },
+    { title: 'Physical Disk', dataIndex: 'physicalDisk', key: 'physicalDisk', width: 200 },
+    { title: 'Volumes', dataIndex: 'volumeCount', key: 'volumeCount', width: 80, align: 'center' as const },
     { title: 'State', key: 'state', width: 100, align: 'center' as const },
     { title: 'Total', key: 'totalSpace', width: 120, align: 'right' as const },
     { title: 'Utilization', key: 'utilization', width: 200 },
-    { title: 'Pool', dataIndex: 'poolIndex', key: 'poolIndex', width: 80, align: 'center' as const },
 ];
 
-// Calculation Helpers
+// Helper to get parent directory (physical disk mount point)
+const getParentDir = (path: string): string => {
+    if (!path) return 'Unknown';
+    const parts = path.replace(/\\/g, '/').split('/').filter(Boolean);
+    if (parts.length <= 1) return '/' + parts.join('/');
+    return '/' + parts.slice(0, -1).join('/');
+};
+
+// Merge volumes on same physical disk
+const mergedDisks = computed(() => {
+    if (!storageInfo.value?.disks) return [];
+    const disks = storageInfo.value.disks;
+    
+    // Group by physical disk (using totalSpace as fingerprint - same disk has same capacity)
+    const diskMap = new Map<string, any>();
+    
+    for (const disk of disks) {
+        const total = disk.totalSpace || disk.total_space || 0;
+        const used = disk.usedSpace || disk.used_space || 0;
+        const drivePath = disk.drivePath || disk.drive_path || '';
+        // Use total capacity as key to identify same physical disk
+        const key = `${total}`;
+        
+        if (diskMap.has(key)) {
+            const existing = diskMap.get(key);
+            existing.volumeCount++;
+            existing.volumes.push(drivePath);
+            // State is ok only if all volumes are ok
+            if (disk.state !== 'ok') existing.state = disk.state;
+        } else {
+            diskMap.set(key, {
+                uuid: disk.uuid || key,
+                physicalDisk: getParentDir(drivePath),
+                volumeCount: 1,
+                volumes: [drivePath],
+                state: disk.state,
+                totalSpace: total,
+                usedSpace: used,
+            });
+        }
+    }
+    
+    return Array.from(diskMap.values());
+});
+
+// Calculation Helpers - use merged disks for accurate counts
 const getTotalCapacity = () => {
-    if (!storageInfo.value?.disks) return 0;
-    return storageInfo.value.disks.reduce((acc: number, disk: any) => 
-        acc + (disk.totalSpace || disk.total_space || 0), 0);
+    if (!mergedDisks.value.length) return 0;
+    return mergedDisks.value.reduce((acc: number, disk: any) => 
+        acc + (disk.totalSpace || 0), 0);
 };
 
 const getUsedCapacity = () => {
-    if (!storageInfo.value?.disks) return 0;
-    return storageInfo.value.disks.reduce((acc: number, disk: any) => 
-        acc + (disk.usedSpace || disk.used_space || 0), 0);
+    if (!mergedDisks.value.length) return 0;
+    return mergedDisks.value.reduce((acc: number, disk: any) => 
+        acc + (disk.usedSpace || 0), 0);
 };
 
 const getOnlineDisks = () => {
-    if (!storageInfo.value?.disks) return 0;
-    return storageInfo.value.disks.filter((d: any) => d.state === 'ok').length;
+    if (!mergedDisks.value.length) return 0;
+    return mergedDisks.value.filter((d: any) => d.state === 'ok').length;
 };
 
 const getOfflineDisks = () => {
-    if (!storageInfo.value?.disks) return 0;
-    return storageInfo.value.disks.filter((d: any) => d.state !== 'ok').length;
+    if (!mergedDisks.value.length) return 0;
+    return mergedDisks.value.filter((d: any) => d.state !== 'ok').length;
 };
 
 const getObjectsCount = () => usageInfo.value?.objectsCount || usageInfo.value?.objects_total_count || 0;

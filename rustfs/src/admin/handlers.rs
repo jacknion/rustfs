@@ -610,6 +610,62 @@ impl Operation for DataUsageInfoHandler {
     }
 }
 
+pub struct BucketUsageHandler {}
+
+#[async_trait::async_trait]
+impl Operation for BucketUsageHandler {
+    async fn call(&self, req: S3Request<Body>, params: Params<'_, '_>) -> S3Result<S3Response<(StatusCode, Body)>> {
+        let Some(ref input_cred) = req.credentials else {
+            return Err(s3_error!(InvalidRequest, "authentication required"));
+        };
+
+        let (cred, owner) =
+            check_key_valid(get_session_token(&req.uri, &req.headers).unwrap_or_default(), &input_cred.access_key).await?;
+
+        let remote_addr = req.extensions.get::<Option<RemoteAddr>>().and_then(|opt| opt.map(|a| a.0));
+        validate_admin_request(
+            &req.headers,
+            &cred,
+            owner,
+            false,
+            vec![
+                Action::AdminAction(AdminAction::DataUsageInfoAdminAction),
+                Action::S3Action(S3Action::ListBucketAction),
+            ],
+            remote_addr,
+        )
+        .await?;
+
+        let bucket = params.get("bucket").unwrap_or("").to_string();
+        if bucket.is_empty() {
+            return Err(s3_error!(InvalidRequest, "bucket name is required"));
+        }
+
+        let Some(store) = new_object_layer_fn() else {
+            return Err(S3Error::with_message(S3ErrorCode::InternalError, "Not init".to_string()));
+        };
+
+        let usage = compute_bucket_usage(store, &bucket).await.map_err(|e| {
+            s3_error!(InternalError, "Failed to compute bucket usage: {}", e)
+        })?;
+
+        let response = serde_json::json!({
+            "objectCount": usage.objects_count,
+            "size": usage.size,
+            "versionsCount": usage.versions_count,
+            "deleteMarkersCount": usage.delete_markers_count
+        });
+
+        let data = serde_json::to_vec(&response)
+            .map_err(|e| s3_error!(InternalError, "Failed to serialize response: {}", e))?;
+
+        let mut header = HeaderMap::new();
+        header.insert(CONTENT_TYPE, "application/json".parse().unwrap());
+
+        Ok(S3Response::with_headers((StatusCode::OK, Body::from(data)), header))
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Default)]
 struct MetricsParams {
     disks: String,

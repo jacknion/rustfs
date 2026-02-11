@@ -122,9 +122,18 @@ const fetchPolicies = async () => {
   }
 }
 
+// Generate random alphanumeric string
+const generateRandomString = (length: number): string => {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  const array = new Uint8Array(length);
+  crypto.getRandomValues(array);
+  return Array.from(array, (byte) => chars[byte % chars.length]).join('');
+};
+
 const showAddModal = () => {
-  form.accessKey = '';
-  form.secretKey = '';
+  // Auto-generate access key (20 chars) and secret key (40 chars)
+  form.accessKey = generateRandomString(20);
+  form.secretKey = generateRandomString(40);
   form.policy = undefined;
   fetchPolicies();
   visible.value = true;

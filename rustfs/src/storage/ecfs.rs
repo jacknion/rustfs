@@ -15,6 +15,7 @@
 use crate::auth::get_condition_values;
 use crate::config::workload_profiles::get_global_buffer_config;
 use crate::error::ApiError;
+use crate::storage::metadata_sync_hooks::{sync_put_object_metadata, sync_delete_object_metadata, sync_object_tags};
 use crate::server::RemoteAddr;
 use crate::storage::concurrency::{
     CachedGetObject, ConcurrencyManager, GetObjectGuard, get_concurrency_aware_buffer_size, get_concurrency_manager,
@@ -696,6 +697,9 @@ impl S3 for FS {
             }
         }
 
+        // Sync object metadata to database
+        sync_put_object_metadata(&obj_info, None);
+
         // Invalidate cache for the completed multipart object
         let manager = get_concurrency_manager();
         let mpu_bucket = bucket.clone();
@@ -1138,6 +1142,9 @@ impl S3 for FS {
         });
 
         // warn!("copy_object oi {:?}", &oi);
+        // Sync copied object metadata to database
+        sync_put_object_metadata(&oi, None);
+
         let object_info = oi.clone();
         let copy_object_result = CopyObjectResult {
             e_tag: oi.etag.map(|etag| to_s3s_etag(&etag)),
@@ -1592,7 +1599,8 @@ impl S3 for FS {
                     }
 
                     if is_err_object_not_found(&err) || is_err_version_not_found(&err) {
-                        // TODO: send event
+                        // Object may have been deleted from storage but still exists in database
+                        sync_delete_object_metadata(&bucket, &key);
 
                         return Ok(S3Response::with_status(DeleteObjectOutput::default(), StatusCode::NO_CONTENT));
                     }
@@ -1604,6 +1612,9 @@ impl S3 for FS {
 
         // Fast in-memory update for immediate quota consistency
         rustfs_ecstore::data_usage::decrement_bucket_usage_memory(&bucket, obj_info.size as u64).await;
+
+        // Sync object deletion to database
+        sync_delete_object_metadata(&bucket, &key);
 
         // Invalidate cache for the deleted object
         let manager = get_concurrency_manager();
@@ -1900,6 +1911,11 @@ impl S3 for FS {
                 )
                 .await
         };
+
+        // Sync deleted objects to database
+        for dobj in &dobjs {
+            sync_delete_object_metadata(&bucket, &dobj.object_name);
+        }
 
         // Invalidate cache for successfully deleted objects
         let manager = get_concurrency_manager();
@@ -4822,6 +4838,9 @@ impl S3 for FS {
         // Fast in-memory update for immediate quota consistency
         rustfs_ecstore::data_usage::increment_bucket_usage_memory(&bucket, obj_info.size as u64).await;
 
+        // Sync object metadata to database
+        sync_put_object_metadata(&obj_info, None);
+
         // Invalidate cache for the written object to prevent stale data
         let manager = get_concurrency_manager();
         let put_bucket = bucket.clone();
@@ -5234,6 +5253,18 @@ impl S3 for FS {
             counter!("rustfs.put_object_tagging.failure").increment(1);
             ApiError::from(e)
         })?;
+
+        // Sync tags to database
+        {
+            let tag_map: std::collections::HashMap<String, String> = req.input.tagging.tag_set.iter()
+                .filter_map(|tag| {
+                    let k = tag.key.as_ref()?.clone();
+                    let v = tag.value.as_ref().cloned().unwrap_or_default();
+                    Some((k, v))
+                })
+                .collect();
+            sync_object_tags(&bucket, &object, tag_map);
+        }
 
         // Invalidate cache for the tagged object
         let manager = get_concurrency_manager();

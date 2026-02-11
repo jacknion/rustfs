@@ -127,6 +127,11 @@ pub fn make_admin_route(console_enabled: bool) -> std::io::Result<impl S3Route> 
     )?;
     r.insert(
         Method::GET,
+        format!("{}{}", ADMIN_PREFIX, "/v3/bucket-usage/{bucket}").as_str(),
+        AdminOperation(&handlers::BucketUsageHandler {}),
+    )?;
+    r.insert(
+        Method::GET,
         format!("{}{}", ADMIN_PREFIX, "/v3/metrics").as_str(),
         AdminOperation(&handlers::MetricsHandler {}),
     )?;
